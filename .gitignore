@@ -1,0 +1,22 @@
+# Build output
+/target/
+node_modules/
+*.log
+
+# Local scratch space and research notes: never part of the project.
+/re-work/
+**/__pycache__/
+
+# Packaged and compiled programs
+*.apk
+*.xapk
+*.aab
+*.dll
+*.so
+*.exe
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

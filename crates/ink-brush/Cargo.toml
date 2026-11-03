@@ -1,0 +1,18 @@
+[package]
+name = "ink-brush"
+description = "Brush parameters and CPU-side stamp placement for inkwell. No GPU code."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ink-core = { version = "0.1.0", path = "../ink-core" }
+serde = { version = "1.0.229", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1.0.154"
+uuid = "1.29.0"

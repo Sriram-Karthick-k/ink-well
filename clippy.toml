@@ -1,0 +1,2 @@
+# Proper names that appear in doc comments and are not code. ".." keeps clippy's default list.
+doc-valid-idents = ["MessagePack", "WebAssembly", "UniFFI", "OpenGL", "GitHub", ".."]

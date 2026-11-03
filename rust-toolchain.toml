@@ -1,0 +1,6 @@
+# Pins the compiler so every machine and CI run builds with the same toolchain.
+[toolchain]
+channel = "1.99"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown", "aarch64-linux-android", "x86_64-linux-android"]

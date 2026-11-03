@@ -1,0 +1,45 @@
+[package]
+name = "ink-app"
+description = "The inkwell application: window, canvas and tool UI built with egui."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+# Android needs a cdylib. It is not declared here because the Windows GNU linker cannot export this many symbols
+# from a DLL (65,535 limit). The Android build will request it explicitly with `--crate-type cdylib`.
+crate-type = ["rlib"]
+
+[[bin]]
+name = "inkwell"
+path = "src/main.rs"
+
+[dependencies]
+# OpenGL (glow) renderer for now. The default wgpu backend is skipped on purpose: it pulls in a large graphics
+# stack that is not needed until the app gets its own GPU stroke renderer.
+eframe = { version = "0.37", default-features = false, features = [
+    "accesskit",
+    "clipboard",
+    "default_fonts",
+    "glow",
+    "links",
+    "wayland",
+    "x11",
+] }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+ink-brush = { version = "0.1.0", path = "../ink-brush" }
+ink-core = { version = "0.1.0", path = "../ink-core" }
+ink-format = { version = "0.1.0", path = "../ink-format" }
+ink-gpu = { version = "0.1.0", path = "../ink-gpu" }
+lyon_tessellation = "1.0.23"
+rfd = "0.17.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+uuid = { version = "1.29.0", features = ["serde"] }
+
+[build-dependencies]
+winresource = "0.1.34"

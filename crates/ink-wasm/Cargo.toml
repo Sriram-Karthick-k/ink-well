@@ -1,0 +1,30 @@
+[package]
+name = "ink-wasm"
+description = "WebAssembly bindings for the inkwell core. Thin: all logic lives in the other crates."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# This crate does not inherit the workspace lints: the code `wasm-bindgen` generates contains `unsafe`
+# blocks, which the workspace policy forbids. The clippy policy is repeated so the code is held to it.
+[lints.rust]
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cast_precision_loss = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+
+[dependencies]
+ink-core = { version = "0.1.0", path = "../ink-core" }
+ink-format = { version = "0.1.0", path = "../ink-format" }
+serde_json = "1.0.154"
+wasm-bindgen = "0.2.130"

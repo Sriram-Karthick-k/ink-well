@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="inkwell">
+  <title>inkwell</title>
+  <defs>
+    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2D2B28"/>
+      <stop offset="1" stop-color="#141311"/>
+    </linearGradient>
+    <linearGradient id="nib" gradientUnits="userSpaceOnUse" x1="168" y1="104" x2="344" y2="420">
+      <stop offset="0" stop-color="#FFD27A"/>
+      <stop offset="1" stop-color="#D38A1E"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#paper)"/>
+  <path d="M92 448 C158 470 214 432 256 421 C298 410 352 452 420 438" fill="none" stroke="#F3EEE3" stroke-opacity="0.92" stroke-width="17" stroke-linecap="round"/>
+  <path d="M256 420 C238 360 180 320 168 238 C160 186 196 140 226 104 L286 104  C316 140 352 186 344 238 C332 320 274 360 256 420 Z M260.500 253.535 A22 22 0 1 0 251.500 253.535 L251.5 408 L260.5 408 Z" fill="url(#nib)" fill-rule="evenodd"/>
+</svg>

@@ -1,0 +1,32 @@
+[package]
+name = "ink-gpu"
+description = "OpenGL stroke renderer for inkwell: stamps into a mask, grain reveal, composite."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Every OpenGL call is `unsafe`. The workspace policy forbids unsafe code outright, which cannot be relaxed for a
+# single module, so this crate repeats the policy with `deny` and `renderer.rs` opts in. Nothing else here may.
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cast_precision_loss = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+similar_names = "allow"
+many_single_char_names = "allow"
+
+[dependencies]
+bytemuck = "1.25.2"
+glow = "0.17"
+ink-brush = { version = "0.1.0", path = "../ink-brush" }
+thiserror = "2.0.21"

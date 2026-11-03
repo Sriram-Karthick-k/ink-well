@@ -1,0 +1,18 @@
+[package]
+name = "ink-format"
+description = "Reads and writes the .ink drawing file (a ZIP of JSON) as an ink-core document."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ink-core = { version = "0.1.0", path = "../ink-core" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+uuid = { version = "1.26.1", features = ["serde"] }
+zip = { version = "7.3.0", default-features = false, features = ["deflate"] }

@@ -1,0 +1,8 @@
+# Normalize text to LF so formatting checks and diffs behave the same on Windows, macOS and Linux.
+* text=auto eol=lf
+
+# Never touch these: line-ending conversion would corrupt them.
+*.ink binary
+*.jpg binary
+*.png binary
+*.wasm binary

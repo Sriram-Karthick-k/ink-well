@@ -1,0 +1,91 @@
+name: Release
+
+# Builds the Windows portable app. Push a tag like v0.1.0 or RELEASE_1.0_BETA to publish a GitHub release with it
+# (the files are added to the release if you made it by hand on that tag); run the workflow by hand (Actions,
+# Release, Run workflow) to get the same files as a build artifact without publishing anything.
+on:
+  push:
+    tags: ["v*", "RELEASE_*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Windows portable build
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      # The C runtime goes into the exe, so it runs on a Windows without the Visual C++ redistributable.
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: rustup show # installs the toolchain pinned in rust-toolchain.toml
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked -p ink-app
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { 'dev-' + $env:GITHUB_SHA.Substring(0, 7) }
+          $name = "inkwell-$version-windows-x64"
+          New-Item -ItemType Directory -Path dist, "stage/$name" | Out-Null
+          Copy-Item target/release/inkwell.exe "stage/$name/inkwell.exe"
+          Copy-Item packaging/README-windows.txt "stage/$name/README.txt"
+          Copy-Item assets/logo/inkwell.png "stage/$name/inkwell.png"
+          Compress-Archive -Path "stage/$name" -DestinationPath "dist/$name.zip"
+          # The bare exe too, for anyone who wants nothing but the file.
+          Copy-Item target/release/inkwell.exe "dist/inkwell-$version-windows-x64.exe"
+          # The same two files without the version in the name, so that one link always gets the newest release:
+          # https://github.com/<owner>/<repo>/releases/latest/download/inkwell-windows-x64.zip
+          Copy-Item "dist/$name.zip" dist/inkwell-windows-x64.zip
+          Copy-Item target/release/inkwell.exe dist/inkwell-windows-x64.exe
+          # Worked out first, so the list does not include the file it is being written to.
+          $sums = Get-ChildItem dist | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)"
+          }
+          $sums | Out-File -Encoding ascii dist/SHA256SUMS.txt
+          $sums
+          # The runner has no graphics card, so the app cannot be started here; this only catches an empty build.
+          if ((Get-Item target/release/inkwell.exe).Length -lt 5MB) { throw 'inkwell.exe is too small to be the app' }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inkwell-windows-x64
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release
+    needs: windows
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and attach the files
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: inkwell-windows-x64
+          path: dist
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          flags=""
+          # v1.0.0-beta.1 and the like are marked as pre-releases.
+          case "$TAG" in *-*) flags="--prerelease" ;; esac
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "inkwell $TAG" --generate-notes $flags
+          fi

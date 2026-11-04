@@ -3,6 +3,7 @@ name = "ink-app"
 description = "The inkwell application: window, canvas and tool UI built with egui."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 

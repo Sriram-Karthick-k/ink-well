@@ -3,6 +3,7 @@ name = "ink-wasm"
 description = "WebAssembly bindings for the inkwell core. Thin: all logic lives in the other crates."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 

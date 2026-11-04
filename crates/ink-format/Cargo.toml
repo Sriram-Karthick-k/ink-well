@@ -3,6 +3,7 @@ name = "ink-format"
 description = "Reads and writes the .ink drawing file (a ZIP of JSON) as an ink-core document."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 

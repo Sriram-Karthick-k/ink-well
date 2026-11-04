@@ -11,6 +11,20 @@ tools, shapes with fill, text, a tool bar you arrange yourself, and an interface
 Android). The web build is still to come. This is an independent implementation. It is not affiliated with any other
 drawing app, and it contains no third-party assets. See `docs/` for the design.
 
+## Screenshots
+
+The library, with folders and recent drawings:
+
+![The inkwell Library with folders and recent drawings](docs/screenshots/library.png)
+
+The editor, with the pen rail on the left edge and the tab bar at the top:
+
+![The editor showing three colored spirals drawn with the pens](docs/screenshots/editor.png)
+
+A floor plan made of rectangles:
+
+![A floor plan drawn with rectangles in the editor](docs/screenshots/editor-shapes.png)
+
 ## Download
 
 Windows 10 and 11 (64-bit) and Android 8 or newer (64-bit ARM) from the
@@ -135,3 +149,9 @@ no admin rights required). Development so far used the GNU host, `x86_64-pc-wind
 
 No brush packs or textures are bundled in this repository. The pencils, marker, airbrush and watercolor can use
 stamp textures that you provide in a folder (`--textures`, or the setting); without them they draw plain soft stamps.
+
+## License
+
+inkwell is released under the [MIT License](LICENSE). You may use, copy, modify, merge, publish, distribute,
+sublicense and sell it, including for commercial purposes, as long as the copyright notice and license text are
+kept with copies or substantial portions of the software.

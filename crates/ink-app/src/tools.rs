@@ -398,7 +398,7 @@ pub fn prune_selection(editor: &Editor, ids: &mut Vec<Uuid>) {
 }
 
 /// The topmost stroke the pointer would count as touching, on visible layers. A locked stroke is not touched.
-fn top_stroke_at(editor: &Editor, at: Point, radius: f32) -> Option<Uuid> {
+pub(crate) fn top_stroke_at(editor: &Editor, at: Point, radius: f32) -> Option<Uuid> {
     editor
         .document()
         .layers

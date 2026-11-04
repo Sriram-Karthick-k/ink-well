@@ -169,7 +169,8 @@ pub fn slice_stroke(
     blade: &[Point],
     mut new_id: impl FnMut() -> Uuid,
 ) -> Option<Vec<Stroke>> {
-    if stroke.samples.len() < 2 || blade.len() < 2 {
+    // A region is one piece: cutting its edge into lengths would not cut the inside.
+    if stroke.samples.len() < 2 || blade.len() < 2 || stroke.pen == crate::document::Pen::Fill {
         return None;
     }
     let reach = stroke.width.unwrap_or(1.0) / 2.0;
@@ -395,5 +396,18 @@ mod tests {
         let pieces = slice_stroke(&line(false), &blade, ids()).expect("cut");
         assert_eq!(pieces.len(), 2);
         assert!((pieces[0].samples.last().expect("sample").point.x - 45.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_region_is_not_cut_by_a_blade() {
+        let mut b =
+            StrokeBuilder::new(Pen::Fill, None, Color::BLACK, 1.0, 0.0).with_id(Uuid::from_u128(2));
+        for (i, (x, y)) in [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)]
+            .into_iter()
+            .enumerate()
+        {
+            b.push(Point::new(x, y), None, i as f64 * 0.01);
+        }
+        assert!(slice_stroke(&b.finish(), &vertical(45.0), ids()).is_none());
     }
 }

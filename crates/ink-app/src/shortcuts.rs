@@ -201,6 +201,8 @@ commands! {
 
     HidePanels => ("hide_panels", "Hide or show the panels", Panels, Canvas, ["Ctrl+Period"]),
     OpenBrushes => ("open_brushes", "All brushes", Panels, Canvas, ["B"]),
+    OpenShapes => ("open_shapes", "Shapes", Panels, Canvas, ["O"]),
+    WriteText => ("write_text", "Write or change words", Tools, Canvas, ["T"]),
     OpenLayers => ("open_layers", "Layers", Panels, Canvas, ["L"]),
     OpenLibrary => ("open_library", "Library", Panels, App, ["Ctrl+L"]),
     OpenSettings => ("open_settings", "Settings", Panels, App, ["Ctrl+Comma"]),

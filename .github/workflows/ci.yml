@@ -32,10 +32,25 @@ jobs:
       - run: cargo build -p ink-wasm --target wasm32-unknown-unknown --release
 
   android:
-    name: android check
+    name: android build
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # Warnings are denied by the jobs above, on the computer's own target; this one is for whether the Android build works.
+      RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@v4
       - run: rustup show
-      # ink-app is left out until the Android entry point (winit's native-activity feature) is set up.
-      - run: cargo check --workspace --exclude ink-wasm --exclude ink-app --target aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target/android/cargo"
+      - uses: ./.github/actions/android-setup
+      # An optimized build without link-time optimization: the whole app for a phone or a tablet, in a few minutes, so a
+      # change that breaks it is seen before a release is.
+      - run: python3 android/build_apk.py --fast
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inkwell-android-arm64-debug-key
+          path: target/android/inkwell.apk
+          retention-days: 7
+          if-no-files-found: error

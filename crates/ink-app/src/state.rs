@@ -187,6 +187,14 @@ pub struct UiState {
     pub color_open: bool,
     /// The note menu under the note chip.
     pub sheet_open: bool,
+    /// The menu of shapes and the person's own objects.
+    pub shapes_open: bool,
+    /// The sheet where the tool bar is arranged (touch).
+    pub toolbar_open: bool,
+    /// What the shapes menu is in the middle of.
+    pub objects: ObjectsUi,
+    /// Words being written or changed, and what is typed so far.
+    pub text: Option<crate::text_ops::TextEntry>,
     /// The precision panel: snapping.
     pub precision_open: bool,
     /// The numbers under the selection bar.
@@ -195,6 +203,9 @@ pub struct UiState {
     pub turn_open: bool,
     /// The section of the settings window that is showing, or `None` while it is closed.
     pub settings: Option<crate::settings::Section>,
+    /// The settings were opened on their landing page rather than on one section. A window with the sections beside
+    /// their content ignores this; a screen with room for one thing at a time starts on the list of sections.
+    pub settings_home: bool,
     /// Where the rail last put its pen, case button and color well, so their flyouts line up with them.
     pub anchors: Anchors,
     /// The layer being renamed and the text typed so far.
@@ -205,12 +216,35 @@ pub struct UiState {
     pub panels_hidden: bool,
 }
 
+/// What the shapes menu is in the middle of.
+#[derive(Debug, Clone, Default)]
+pub struct ObjectsUi {
+    /// A tap on a shape picks it to arrange (pin it, rename it, delete it) instead of putting it on the paper.
+    pub arranging: bool,
+    /// The shape picked to arrange.
+    pub picked: Option<String>,
+    /// The shape being carried out of the drawer, by id, and where the pointer was last seen: on a touch screen the pointer
+    /// is gone as the finger lifts, and it is let go where it was.
+    pub dragging: Option<String>,
+    pub carried_at: Option<eframe::egui::Pos2>,
+    /// The name being typed for an object about to be made of the selection.
+    pub naming: Option<String>,
+    /// The object being renamed and the name typed so far.
+    pub renaming: Option<(String, String)>,
+}
+
 /// Vertical positions, in points, that flyouts line up with.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Anchors {
     pub pen: f32,
     pub case: f32,
+    pub shapes: f32,
+    /// Where the drawer of shapes is on the screen, while it is open.
+    pub drawer: Option<eframe::egui::Rect>,
     pub color: f32,
+    /// The top of the dock the rail becomes in a window taller than it is wide, or `0.0` while it is on the edge:
+    /// flyouts open above it.
+    pub dock_top: f32,
 }
 
 impl UiState {
@@ -222,6 +256,9 @@ impl UiState {
         self.sheet_open = false;
         self.precision_open = false;
         self.turn_open = false;
+        self.shapes_open = false;
+        self.toolbar_open = false;
+        self.objects = ObjectsUi::default();
     }
 
     /// `true` while any flyout, the note menu, the precision panel or the turn panel is open.
@@ -233,6 +270,8 @@ impl UiState {
             || self.sheet_open
             || self.precision_open
             || self.turn_open
+            || self.shapes_open
+            || self.toolbar_open
     }
 
     pub fn toggle_turn(&mut self) {
@@ -241,10 +280,19 @@ impl UiState {
         self.turn_open = open;
     }
 
+    /// The layers panel and the two panels the top bar opens (precision and the note menu) hang from the same
+    /// corner, so only one of them is shown at a time.
+    pub fn toggle_layers(&mut self) {
+        let open = !self.layers_open;
+        self.close_popovers();
+        self.layers_open = open;
+    }
+
     pub fn toggle_precision(&mut self) {
         let open = !self.precision_open;
         self.close_popovers();
         self.precision_open = open;
+        self.layers_open &= !open;
     }
 
     pub fn toggle_case(&mut self) {
@@ -265,10 +313,24 @@ impl UiState {
         self.color_open = open;
     }
 
+    pub fn toggle_shapes(&mut self) {
+        let open = !self.shapes_open;
+        self.close_popovers();
+        self.shapes_open = open;
+        self.layers_open &= !open;
+    }
+
+    pub fn open_toolbar_editor(&mut self) {
+        self.close_popovers();
+        self.toolbar_open = true;
+        self.layers_open = false;
+    }
+
     pub fn toggle_sheet(&mut self) {
         let open = !self.sheet_open;
         self.close_popovers();
         self.sheet_open = open;
+        self.layers_open &= !open;
     }
 }
 
@@ -456,6 +518,23 @@ mod tests {
         assert!(ui.sheet_open && !ui.dial_open);
         ui.toggle_sheet();
         assert!(!ui.any_popover(), "toggling an open one closes it");
+    }
+
+    #[test]
+    fn the_layers_and_the_top_bar_panels_do_not_pile_up_in_their_corner() {
+        let mut ui = UiState::default();
+        ui.toggle_layers();
+        assert!(ui.layers_open);
+        ui.toggle_precision();
+        assert!(ui.precision_open && !ui.layers_open);
+        ui.toggle_layers();
+        assert!(ui.layers_open && !ui.precision_open);
+        ui.toggle_sheet();
+        assert!(ui.sheet_open && !ui.layers_open);
+        ui.toggle_layers();
+        assert!(ui.layers_open && !ui.sheet_open);
+        ui.toggle_layers();
+        assert!(!ui.layers_open, "toggling it again puts it away");
     }
 
     #[test]

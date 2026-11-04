@@ -7,6 +7,7 @@ use eframe::egui::{
 
 use crate::app::InkApp;
 use crate::brushes::{self, BRUSHES, BrushInfo};
+use crate::touch_input::FingerDrawing;
 use ink_core::Pen;
 
 use crate::config::{
@@ -16,6 +17,7 @@ use crate::config::{
 use ink_core::artboard::Artboard;
 use ink_core::units::{Format, Measurement, Precision, Unit};
 
+use crate::density;
 use crate::icons::{self, Icon};
 use crate::precision;
 use crate::render;
@@ -157,7 +159,8 @@ fn nav(ui: &mut Ui, section: &mut Section) {
     });
 }
 
-fn content(ui: &mut Ui, app: &mut InkApp, section: Section) {
+/// The page of a section: its title and its controls. The touch interface shows it on a page of its own.
+pub(crate) fn content(ui: &mut Ui, app: &mut InkApp, section: Section) {
     ui.spacing_mut().item_spacing.y = 12.0;
     ui.label(RichText::new(section.label()).size(19.0).strong());
     match section {
@@ -352,7 +355,11 @@ fn tools_section(ui: &mut Ui, config: &mut Config) {
     widgets::setting_row(
         ui,
         "Takes",
-        Some("The whole stroke it touches, or only the part under it (E, Shift+E and Alt+E)"),
+        Some(if density::get(ui.ctx()).key_hints {
+            "The whole stroke it touches, or only the part under it (E, Shift+E and Alt+E)"
+        } else {
+            "The whole stroke it touches, or only the part under it"
+        }),
         |ui| {
             ui.horizontal(|ui| {
                 let options: Vec<(EraserKind, &str)> =
@@ -369,8 +376,10 @@ fn tools_section(ui: &mut Ui, config: &mut Config) {
         ToolsConfig::ERASER_RANGE.0..=ToolsConfig::ERASER_RANGE.1,
         |v| format!("{v:.0}"),
     );
-    widgets::divider(ui);
-    selection_keys_settings(ui, tools);
+    if density::get(ui.ctx()).key_hints {
+        widgets::divider(ui);
+        selection_keys_settings(ui, tools);
+    }
     if ui.button("Reset the tools").clicked() {
         *tools = ToolsConfig::default();
     }
@@ -756,6 +765,7 @@ fn measurement_controls(ui: &mut Ui, m: &mut Measurement) {
 }
 
 fn workspace_section(ui: &mut Ui, config: &mut Config) {
+    let keys = density::get(ui.ctx()).key_hints;
     widgets::caption(
         ui,
         "How the paper behaves, what helps while you draw, and what is in the pen rail.",
@@ -764,7 +774,11 @@ fn workspace_section(ui: &mut Ui, config: &mut Config) {
     widgets::toggle_row(
         ui,
         "Zoom the canvas",
-        Some("Pinch, the mouse wheel and the zoom keys. Off, the zoom stays where it is."),
+        Some(if keys {
+            "Pinch, the mouse wheel and the zoom keys. Off, the zoom stays where it is."
+        } else {
+            "Pinch to zoom. Off, the zoom stays where it is."
+        }),
         &mut config.input.zoom_enabled,
     );
     ui.add_enabled_ui(config.input.zoom_enabled, |ui| {
@@ -778,7 +792,11 @@ fn workspace_section(ui: &mut Ui, config: &mut Config) {
     widgets::toggle_row(
         ui,
         "Turn the canvas",
-        Some("Two fingers twisting, and Ctrl with the arrow keys. Off, the paper stays as it is."),
+        Some(if keys {
+            "Two fingers twisting, and Ctrl with the arrow keys. Off, the paper stays as it is."
+        } else {
+            "Two fingers twisting, and the angle in the drawing menu. Off, the paper stays as it is."
+        }),
         &mut config.input.rotation_enabled,
     );
     ui.add_enabled_ui(config.input.rotation_enabled, |ui| {
@@ -812,14 +830,16 @@ fn workspace_section(ui: &mut Ui, config: &mut Config) {
     );
     widgets::divider(ui);
     rail_settings(ui, config);
-    widgets::divider(ui);
-    widgets::heading(ui, "KEYBOARD");
-    widgets::toggle_row(
-        ui,
-        "Keyboard shortcuts",
-        Some("Off, no key does anything. The keys themselves are under Shortcuts."),
-        &mut config.workspace.keyboard_shortcuts,
-    );
+    if keys {
+        widgets::divider(ui);
+        widgets::heading(ui, "KEYBOARD");
+        widgets::toggle_row(
+            ui,
+            "Keyboard shortcuts",
+            Some("Off, no key does anything. The keys themselves are under Shortcuts."),
+            &mut config.workspace.keyboard_shortcuts,
+        );
+    }
 }
 
 /// How many pens the rail holds, and which.
@@ -834,7 +854,11 @@ fn rail_settings(ui: &mut Ui, config: &mut Config) {
     widgets::setting_row(
         ui,
         "Pens on the rail",
-        Some("How many pens are in the rail. Each one has a key: 1, 2, 3 and so on."),
+        Some(if density::get(ui.ctx()).key_hints {
+            "How many pens are in the rail. Each one has a key: 1, 2, 3 and so on."
+        } else {
+            "How many pens are in the bar along the bottom."
+        }),
         |ui| {
             ui.horizontal(|ui| {
                 widgets::segmented(ui, &options, &mut slots);
@@ -870,13 +894,57 @@ fn input_section(ui: &mut Ui, config: &mut Config) {
     ui.add_enabled_ui(input.use_pressure, |ui| {
         pressure_response(ui, input);
     });
+    widgets::toggle_row(
+        ui,
+        "Hold to move the canvas",
+        Some("Hold the pen still where it touches, then drag, to move the page instead of drawing"),
+        &mut input.pen_hold_to_pan,
+    );
+    ui.add_enabled_ui(input.pen_hold_to_pan, |ui| {
+        widgets::slider_row(
+            ui,
+            "Hold for",
+            Some("How long the pen is held still"),
+            &mut input.pen_hold_seconds,
+            config::InputConfig::HOLD_SECONDS.0..=config::InputConfig::HOLD_SECONDS.1,
+            |v| format!("{v:.1} s"),
+        );
+    });
     widgets::divider(ui);
     widgets::heading(ui, "TOUCH");
+    let drawing: Vec<(FingerDrawing, &str)> =
+        FingerDrawing::ALL.iter().map(|d| (*d, d.label())).collect();
+    widgets::setting_row(
+        ui,
+        "Draw with a finger",
+        Some(
+            "Always: fingers work on the paper like the stylus. Automatic: a finger draws until a stylus is used, and then only moves the page",
+        ),
+        |ui| {
+            widgets::segmented(ui, &drawing, &mut input.finger_drawing);
+        },
+    );
+    widgets::toggle_row(
+        ui,
+        "Ignore the palm",
+        Some("A large touch, and any touch while the stylus is near the screen, is not input"),
+        &mut input.palm_rejection,
+    );
     widgets::toggle_row(
         ui,
         "Two-finger pan and zoom",
         Some("Pinch to zoom and drag with two fingers to move the canvas"),
         &mut input.two_finger_gestures,
+    );
+    widgets::toggle_row(
+        ui,
+        "Turn the canvas with two fingers",
+        Some(if density::get(ui.ctx()).key_hints {
+            "Off, two fingers only move and zoom it; the turn keys and the angle panel still turn it"
+        } else {
+            "Off, two fingers only move and zoom it; the angle in the drawing menu still turns it"
+        }),
+        &mut input.rotate_with_fingers,
     );
     let actions: Vec<(TapAction, &str)> = TapAction::ALL.iter().map(|a| (*a, a.label())).collect();
     for (title, hint, action) in [
@@ -900,14 +968,16 @@ fn input_section(ui: &mut Ui, config: &mut Config) {
             choose(ui, title, action, &actions, 170.0);
         });
     }
-    widgets::divider(ui);
-    widgets::heading(ui, "MOUSE");
-    widgets::toggle_row(
-        ui,
-        "Mouse wheel zooms",
-        Some("Off, the wheel moves the canvas and Ctrl with the wheel zooms"),
-        &mut input.wheel_zooms,
-    );
+    if density::get(ui.ctx()).key_hints {
+        widgets::divider(ui);
+        widgets::heading(ui, "MOUSE");
+        widgets::toggle_row(
+            ui,
+            "Mouse wheel zooms",
+            Some("Off, the wheel moves the canvas and Ctrl with the wheel zooms"),
+            &mut input.wheel_zooms,
+        );
+    }
 }
 
 /// The two sliders that set how hard a pen has to press, with the curve they make.

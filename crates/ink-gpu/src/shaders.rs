@@ -43,6 +43,30 @@ void main() {
 }
 ";
 
+/// The triangles of a filled region, in canvas units, placed by the same view as the stamps.
+pub const FILL_VERT: &str = r"
+layout(location = 0) in vec2 a_pos;
+uniform vec4 u_view;
+uniform vec2 u_size;
+vec2 seen(vec2 v) {
+    float vc = cos(u_view.w);
+    float vs = sin(u_view.w);
+    return vec2(v.x * vc + v.y * vs, -v.x * vs + v.y * vc);
+}
+void main() {
+    vec2 p = vec2(u_view.y, u_view.z) + seen(vec2(a_pos.x * u_view.x, -a_pos.y * u_view.x));
+    gl_Position = vec4(p.x / u_size.x * 2.0 - 1.0, 1.0 - p.y / u_size.y * 2.0, 0.0, 1.0);
+}
+";
+
+/// Everything inside a triangle is covered.
+pub const FILL_FRAG: &str = r"
+out vec4 o_color;
+void main() {
+    o_color = vec4(1.0);
+}
+";
+
 /// A round stamp: one pixel of antialiasing at the rim and a falloff from `u_hardness` out to the rim, or the
 /// texture when the pen has one.
 pub const STAMP_FRAG: &str = r"

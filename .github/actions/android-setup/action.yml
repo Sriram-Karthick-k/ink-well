@@ -1,0 +1,20 @@
+name: Set up the Android build
+description: The JDK, the Android SDK and NDK, and cargo-ndk, which `android/build_apk.py` needs.
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: "17"
+
+    - uses: android-actions/setup-android@v3
+      with:
+        # The platform the Java is compiled against, the tools that pack and sign the APK, and the NDK that cargo-ndk links
+        # with. The script uses the newest of each that is installed.
+        packages: "platforms;android-35 build-tools;35.0.0 ndk;27.2.12479018"
+
+    - uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-ndk

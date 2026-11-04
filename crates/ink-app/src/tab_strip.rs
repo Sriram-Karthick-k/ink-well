@@ -1,5 +1,5 @@
 //! The toolbar docked along the top of the window: the Library first, then one tab for every open drawing, a
-//! button for a new one, and on the right the buttons for layers, the drawing menu and the settings.
+//! button for a new one, and on the right the buttons of `bar_buttons`.
 //!
 //! It is a panel, not something floating over the paper, so the canvas always starts below it. Tabs close with
 //! their cross or a middle click and can be dragged into another order.
@@ -10,23 +10,26 @@ use eframe::egui::{
 };
 
 use crate::app::InkApp;
-use crate::icons::Icon;
-use crate::settings::Section;
-use crate::shortcuts::Command;
+use crate::bar_buttons;
+use crate::density::Density;
 use crate::tabs::TabLabel;
 use crate::theme;
 use crate::widgets;
 
 /// The height of the whole bar.
-pub const BAR_HEIGHT: f32 = 46.0;
+const BAR_HEIGHT: f32 = Density::DESKTOP.bar_height;
 const TAB_HEIGHT: f32 = 37.0;
 const LIBRARY_WIDTH: f32 = 118.0;
 const NEW_TAB: f32 = 36.0;
 const GAP: f32 = 2.0;
 const MIN_TAB: f32 = 72.0;
 const MAX_TAB: f32 = 220.0;
-/// Room kept free on the right for the buttons.
-const RIGHT_WIDTH: f32 = 150.0;
+/// The buttons on the right: how big each is and the gap between them.
+const BUTTON: f32 = 34.0;
+const BUTTON_GAP: f32 = 6.0;
+/// Room kept free on the right for the buttons, with a little over.
+const RIGHT_WIDTH: f32 =
+    16.0 + bar_buttons::COUNT * BUTTON + (bar_buttons::COUNT - 1.0) * BUTTON_GAP;
 const BAR: Color32 = Color32::from_rgb(0x15, 0x14, 0x12);
 const ACTIVE_TAB: Color32 = Color32::from_rgb(0x2B, 0x29, 0x26);
 
@@ -97,8 +100,8 @@ pub fn show(ui: &mut Ui, app: &mut InkApp) {
                     },
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    right_buttons(ui, app);
+                    ui.spacing_mut().item_spacing.x = BUTTON_GAP;
+                    bar_buttons::show(ui, app, BUTTON);
                 });
             });
         });
@@ -111,44 +114,6 @@ pub fn show(ui: &mut Ui, app: &mut InkApp) {
             Action::New => app.new_tab(ui.ctx()),
             Action::Move(from, to) => app.move_tab(from, to),
         }
-    }
-}
-
-/// Settings, the drawing menu and layers, from the right edge inward.
-fn right_buttons(ui: &mut Ui, app: &mut InkApp) {
-    if widgets::round_button(ui, 34.0, Icon::Gear, true, false)
-        .on_hover_text("Settings (Ctrl+,)")
-        .clicked()
-    {
-        app.open_settings(Section::Brushes);
-    }
-    if app.ui.library_open {
-        return;
-    }
-    let menu = app.ui.sheet_open;
-    if widgets::round_button(ui, 34.0, Icon::Menu, true, menu)
-        .on_hover_text("Drawing menu: save, paper, shortcuts")
-        .clicked()
-    {
-        app.ui.toggle_sheet();
-    }
-    let layers = app.ui.layers_open;
-    if widgets::round_button(ui, 34.0, Icon::Layers, true, layers)
-        .on_hover_text("Layers (L)")
-        .clicked()
-    {
-        app.ui.layers_open = !layers;
-    }
-    // Lit while the panel is open or snapping is on, so it can be seen without opening it.
-    let precision = app.ui.precision_open || app.config.precision.snap;
-    let hint = app
-        .keymap
-        .hint(Command::OpenPrecision, "Precision: snapping");
-    if widgets::round_button(ui, 34.0, Icon::Precision, true, precision)
-        .on_hover_text(hint)
-        .clicked()
-    {
-        app.ui.toggle_precision();
     }
 }
 

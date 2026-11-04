@@ -5,7 +5,7 @@
 
 use uuid::Uuid;
 
-use crate::document::{RawSample, Stroke};
+use crate::document::{Pen, RawSample, Stroke};
 use crate::geometry::Point;
 use crate::nudge::densify;
 use crate::slice::lerp_sample;
@@ -125,6 +125,17 @@ fn runs_outside(stroke: &Stroke, from: Point, to: Point, radius: f32) -> Vec<Run
     runs
 }
 
+/// `true` when a disc of `radius` swept from `from` to `to` touches the region `stroke`: its inside, or its edge.
+fn swept_touches(stroke: &Stroke, from: Point, to: Point, radius: f32) -> bool {
+    let length = from.distance(to);
+    let steps = (length / radius.max(0.5)).ceil().max(1.0) as u32;
+    (0..=steps).any(|i| {
+        let t = i as f32 / steps as f32;
+        let at = Point::new(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t);
+        crate::hit::touches(stroke, at, radius)
+    })
+}
+
 /// What is left of `stroke` after an eraser of `radius` wiped from `from` to `to`.
 ///
 /// A stroke that has only a stored path and no samples cannot be wiped in part: it is gone if the eraser touches
@@ -142,6 +153,14 @@ pub fn wipe(stroke: &Stroke, from: Point, to: Point, radius: f32) -> Wiped {
     });
     if !reaches {
         return Wiped::Untouched;
+    }
+    // A region is taken away whole: wiping part of its edge would leave a different shape.
+    if stroke.pen == Pen::Fill {
+        return if swept_touches(stroke, from, to, radius) {
+            Wiped::Gone
+        } else {
+            Wiped::Untouched
+        };
     }
     if stroke.samples.len() < 2 {
         let touched = stroke.points().any(|p| distance_to(p, from, to) <= radius);
@@ -348,6 +367,32 @@ mod tests {
         assert_eq!(wipe(&s, at(50.0, 0.0), at(50.0, 0.0), 5.0), Wiped::Gone);
         assert_eq!(
             wipe(&s, at(50.0, 50.0), at(50.0, 50.0), 5.0),
+            Wiped::Untouched
+        );
+    }
+
+    /// A square region drawn point by point, with samples as a hand-drawn one has.
+    fn square_region() -> Stroke {
+        let mut b =
+            StrokeBuilder::new(Pen::Fill, None, Color::BLACK, 1.0, 0.0).with_id(Uuid::from_u128(2));
+        for (i, (x, y)) in [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)]
+            .into_iter()
+            .enumerate()
+        {
+            b.push(Point::new(x, y), None, i as f64 * 0.01);
+        }
+        b.finish()
+    }
+
+    #[test]
+    fn a_region_the_eraser_goes_over_is_taken_away_whole_not_cut_to_a_different_shape() {
+        let region = square_region();
+        assert_eq!(
+            wipe(&region, at(50.0, 50.0), at(52.0, 50.0), 4.0),
+            Wiped::Gone
+        );
+        assert_eq!(
+            wipe(&region, at(300.0, 50.0), at(310.0, 50.0), 4.0),
             Wiped::Untouched
         );
     }

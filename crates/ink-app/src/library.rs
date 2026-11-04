@@ -22,6 +22,10 @@ const DELETED_FOLDER: &str = ".deleted";
 /// A preview never carries more strokes or points than this, so a huge drawing stays cheap to show.
 const MAX_PREVIEW_STROKES: usize = 3000;
 const MAX_PREVIEW_POINTS: usize = 48;
+/// A region keeps its corners and curves: points are only dropped that are within this many canvas units of the line
+/// between those kept, and then no more than this many are kept.
+const REGION_TOLERANCE: f32 = 0.3;
+const MAX_REGION_POINTS: usize = 400;
 
 /// One stroke of a preview, in canvas units with y pointing up.
 #[derive(Debug, Clone, PartialEq)]
@@ -29,6 +33,9 @@ pub struct PreviewStroke {
     pub color: [u8; 4],
     pub width: f32,
     pub points: Vec<[f32; 2]>,
+    /// For a region (a shape's fill, the letters of some words): the triangles of its inside, `x, y` pairs in canvas units,
+    /// three pairs to a triangle. Empty for a line.
+    pub fill: Vec<f32>,
 }
 
 /// A small picture of a note: its paper and a thinned-out copy of its strokes.
@@ -75,12 +82,39 @@ pub fn preview_of(document: &Document) -> Preview {
         if all.is_empty() {
             continue;
         }
-        let step = all.len().div_ceil(MAX_PREVIEW_POINTS).max(1);
-        let mut points: Vec<[f32; 2]> = all.iter().step_by(step).map(|p| [p.x, p.y]).collect();
-        if let Some(last) = all.last()
-            && points.last() != Some(&[last.x, last.y])
-        {
-            points.push([last.x, last.y]);
+        let region = stroke.pen == ink_core::Pen::Fill && all.len() >= 3;
+        let mut points: Vec<[f32; 2]> = if region {
+            // A shape's fill and the letters of words are drawn as what they are, with their corners: thinning them evenly
+            // would round the star off and turn the letters to mush.
+            let whole: Vec<[f32; 2]> = all.iter().map(|p| [p.x, p.y]).collect();
+            let mut kept = ink_core::shapes::simplify(&whole, REGION_TOLERANCE);
+            let step = kept.len().div_ceil(MAX_REGION_POINTS).max(1);
+            if step > 1 {
+                kept = kept.into_iter().step_by(step).collect();
+            }
+            kept
+        } else {
+            let step = all.len().div_ceil(MAX_PREVIEW_POINTS).max(1);
+            let mut thinned: Vec<[f32; 2]> = all.iter().step_by(step).map(|p| [p.x, p.y]).collect();
+            if let Some(last) = all.last()
+                && thinned.last() != Some(&[last.x, last.y])
+            {
+                thinned.push([last.x, last.y]);
+            }
+            thinned
+        };
+        let fill = if region {
+            let polygon: Vec<ink_core::Point> = points
+                .iter()
+                .map(|p| ink_core::Point::new(p[0], p[1]))
+                .collect();
+            ink_brush::fill::triangulate(&polygon)
+        } else {
+            Vec::new()
+        };
+        if region && fill.is_empty() {
+            // Nothing inside (all on a line): it is a line, as it was before regions.
+            points.dedup();
         }
         let width = stroke.width.unwrap_or(2.0);
         for [x, y] in &points {
@@ -99,6 +133,7 @@ pub fn preview_of(document: &Document) -> Preview {
             ],
             width,
             points,
+            fill,
         });
     }
     let bounds = if x0 <= x1 && y0 <= y1 {
@@ -747,6 +782,13 @@ pub fn restore_item(deleted: &Deleted) -> Result<PathBuf, String> {
 
 /// Copies files into `folder`, leaving the originals alone. Each result is the new path or why it failed.
 #[must_use]
+#[cfg_attr(
+    target_os = "android",
+    allow(
+        dead_code,
+        reason = "Android imports through the system picker, which hands over bytes: see `import_bytes`"
+    )
+)]
 pub fn import_notes(files: &[PathBuf], folder: &Path) -> Vec<Result<PathBuf, String>> {
     if let Err(e) = std::fs::create_dir_all(folder) {
         return vec![Err(format!("Could not create the folder: {e}"))];
@@ -764,6 +806,24 @@ pub fn import_notes(files: &[PathBuf], folder: &Path) -> Vec<Result<PathBuf, Str
                 .map_err(|e| format!("Could not import {}: {e}", file.display()))
         })
         .collect()
+}
+
+/// Puts a drawing that arrived as bytes (from the system's file picker, which hands over a stream and not a path) in
+/// `folder` under its own name, or a numbered one if that is taken.
+///
+/// # Errors
+/// The bytes are not a drawing, or the file could not be written; the message says which, in words for the user.
+pub fn import_bytes(name: &str, bytes: &[u8], folder: &Path) -> Result<PathBuf, String> {
+    ink_format::read(bytes).map_err(|_| format!("{name} is not an inkwell drawing."))?;
+    let stem = Path::new(name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(sanitize_name)
+        .unwrap_or_else(|| "Imported".to_owned());
+    std::fs::create_dir_all(folder).map_err(|e| format!("Could not create the folder: {e}"))?;
+    let target = unique_path(folder, &stem);
+    std::fs::write(&target, bytes).map_err(|e| format!("Could not import {name}: {e}"))?;
+    Ok(target)
 }
 
 // Dates
@@ -861,6 +921,46 @@ mod tests {
         let path = folder.join(format!("{name}.{EXTENSION}"));
         std::fs::write(&path, bytes).expect("file");
         path
+    }
+
+    #[test]
+    fn a_drawing_that_arrived_as_bytes_is_put_in_the_folder_under_its_own_name() {
+        let root = temp_folder("bytes");
+        let bytes = std::fs::read(write_note(&root.join("source"), "Sketch", 2)).expect("bytes");
+        let target = root.join("library");
+        let first = import_bytes("Sketch.ink", &bytes, &target).expect("imported");
+        assert_eq!(first, target.join("Sketch.ink"));
+        let second = import_bytes("Sketch.ink", &bytes, &target).expect("imported again");
+        assert_eq!(
+            second,
+            target.join("Sketch 2.ink"),
+            "a taken name gets a number"
+        );
+        assert_eq!(std::fs::read(&first).expect("read"), bytes);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn bytes_that_are_not_a_drawing_are_refused_and_leave_nothing_behind() {
+        let root = temp_folder("not-a-drawing");
+        let target = root.join("library");
+        let error = import_bytes("Notes.txt", b"hello", &target).expect_err("refused");
+        assert!(
+            error.contains("Notes.txt is not an inkwell drawing"),
+            "{error}"
+        );
+        assert!(!target.exists(), "nothing was made");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_name_the_system_gives_with_nothing_usable_in_it_becomes_imported() {
+        let root = temp_folder("nameless");
+        let bytes = std::fs::read(write_note(&root.join("source"), "A", 1)).expect("bytes");
+        let target = root.join("library");
+        let path = import_bytes("...", &bytes, &target).expect("imported");
+        assert_eq!(path, target.join("Imported.ink"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn age(path: &Path, seconds: u64) {
@@ -1267,6 +1367,90 @@ mod tests {
             format_age(UNIX_EPOCH, now),
             "Just now",
             "a time in the future is not negative"
+        );
+    }
+
+    fn region(editor: &mut Editor, points: Vec<Point>) {
+        let mut b = StrokeBuilder::new(Pen::Fill, None, Color::new(1.0, 0.8, 0.0, 1.0), 1.0, 0.0);
+        b.replace_with(points);
+        let stroke = b.with_id(editor.next_id()).finish();
+        editor.commit_stroke(0, stroke);
+    }
+
+    #[test]
+    fn a_region_in_a_preview_carries_the_triangles_of_its_inside() {
+        let mut editor = Editor::blank(IdGen::new(5));
+        region(
+            &mut editor,
+            vec![
+                Point::new(0.0, 0.0),
+                Point::new(100.0, 0.0),
+                Point::new(100.0, 100.0),
+                Point::new(0.0, 100.0),
+            ],
+        );
+        let preview = preview_of(editor.document());
+        let fill = &preview.strokes[0].fill;
+        assert!(!fill.is_empty(), "a filled shape is filled");
+        assert!((ink_brush::fill::area(fill) - 10_000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn a_line_in_a_preview_has_no_fill() {
+        let mut editor = Editor::blank(IdGen::new(5));
+        let mut b = StrokeBuilder::new(Pen::Pen, Some(3.0), Color::BLACK, 1.0, 0.0);
+        b.replace_with(vec![
+            Point::new(0.0, 0.0),
+            Point::new(50.0, 0.0),
+            Point::new(50.0, 50.0),
+        ]);
+        let stroke = b.with_id(editor.next_id()).finish();
+        editor.commit_stroke(0, stroke);
+        assert_eq!(preview_of(editor.document()).strokes[0].fill.len(), 0);
+    }
+
+    #[test]
+    fn the_corners_of_a_star_survive_the_preview_and_a_hole_stays_a_hole() {
+        let star = ink_core::shapes::built_in_named("star").expect("star");
+        let mut editor = Editor::blank(IdGen::new(5));
+        let mut ids = IdGen::new(9);
+        let style = ink_core::shapes::Style {
+            pen: Pen::Pen,
+            width: Some(3.0),
+            color: Color::BLACK,
+            fill: Some(Color::new(1.0, 0.8, 0.0, 1.0)),
+            outline: true,
+        };
+        for stroke in star.to_strokes(Point::new(0.0, 0.0), 200.0, &style, &mut || ids.next_id()) {
+            editor.commit_stroke(0, stroke);
+        }
+        let preview = preview_of(editor.document());
+        assert!(!preview.strokes[0].fill.is_empty(), "the fill comes first");
+        // Ten corners, and the first is repeated at the end that closes the outline.
+        assert!(
+            preview.strokes[0].points.len() >= 10,
+            "{}",
+            preview.strokes[0].points.len()
+        );
+        // A ring with a hole in it: bridged, so the inside is the ring and not the whole disc.
+        let mut editor = Editor::blank(IdGen::new(6));
+        let ring: Vec<Point> = (0..=40)
+            .map(|i| {
+                let a = i as f32 / 40.0 * std::f32::consts::TAU;
+                Point::new(100.0 * a.cos(), 100.0 * a.sin())
+            })
+            .chain((0..=40).map(|i| {
+                let a = i as f32 / 40.0 * std::f32::consts::TAU;
+                Point::new(50.0 * a.cos(), 50.0 * a.sin())
+            }))
+            .chain(std::iter::once(Point::new(100.0, 0.0)))
+            .collect();
+        region(&mut editor, ring);
+        let area = ink_brush::fill::area(&preview_of(editor.document()).strokes[0].fill);
+        let disc = std::f32::consts::PI * 100.0 * 100.0;
+        assert!(
+            area < 0.9 * disc,
+            "the hole is not filled: {area} of {disc}"
         );
     }
 }

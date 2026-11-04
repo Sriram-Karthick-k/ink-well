@@ -1,0 +1,27 @@
+[package]
+name = "ink-android"
+description = "The Android entry point: the library an Android activity loads, which runs the inkwell app."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# The activity loads this as `libink_android.so`. On any other system the crate is empty.
+[lib]
+crate-type = ["cdylib"]
+
+# This crate does not inherit the workspace lints: the entry point Android looks for has to be an unmangled
+# function, which the workspace policy forbids. The clippy policy is repeated so the code is held to it.
+[lints.rust]
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6", features = ["native-activity"] }
+android_logger = "0.15"
+ink-app = { version = "0.1.0", path = "../ink-app" }
+jni = "0.21"
+log = "0.4"

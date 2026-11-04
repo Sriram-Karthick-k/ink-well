@@ -21,23 +21,29 @@ use crate::config::{self, Config, Renderer};
 use crate::gpu::GpuScene;
 use crate::guides::GuideState;
 use crate::library::Library;
+use crate::objects::{self, Objects};
+use crate::platform;
 use crate::render::StrokeCache;
-use crate::settings::{self, Section};
+use crate::settings::Section;
+use crate::shapes_drawer;
+use crate::shell;
 use crate::shortcuts::Keymap;
 use crate::state::{Mode, ToolState, UiState, ViewState};
 use crate::tabs::Tab;
+use crate::text_editor;
 use crate::textures;
 use crate::tools::Gesture;
 use crate::touch_taps::TapTracker;
-use crate::{
-    flyouts, hud, layers_panel, library_page, paper, precision, rail, selection_bar, tab_strip,
-    theme,
-};
+use crate::{flyouts, hud, paper, selection_bar, theme};
 
 /// Frames to wait before taking a requested screenshot, so layout and fonts have settled.
 const SCREENSHOT_FRAME: u32 = 12;
 
 type Shot = Arc<Mutex<Option<Arc<ColorImage>>>>;
+
+/// No strokes: what is left out of the drawing when no words are being changed.
+static NO_STROKES: std::sync::LazyLock<std::collections::HashSet<Uuid>> =
+    std::sync::LazyLock::new(std::collections::HashSet::new);
 
 /// The application state.
 #[derive(Debug)]
@@ -55,6 +61,8 @@ pub struct InkApp {
     /// Where the settings are saved; `None` when they are not (tests and screenshots).
     pub(crate) config_path: Option<PathBuf>,
     config_dirty: bool,
+    /// The shapes the app provides and the objects the person made.
+    pub(crate) objects: Objects,
     /// The notes page: what is in the notes folder.
     pub(crate) library: Library,
     /// The editor revision last seen, and when it first appeared, for saving a moment after the last change.
@@ -115,6 +123,8 @@ pub struct InkApp {
     pub(crate) artboard: Option<ink_core::artboard::Artboard>,
     /// The artboard, guides, locks and groups as they were when the drawing was last saved or opened.
     pub(crate) saved_extras: ink_format::Extras,
+    /// Decides what each touch of a stylus, finger or palm does (Android).
+    pub(crate) touch: crate::touch_input::TouchFilter,
     /// The same as seen by the autosave, to tell when they have changed since it last looked.
     pub(crate) autosave_extras: ink_format::Extras,
     /// How long the pen has been still, for shape recognition.
@@ -216,6 +226,11 @@ impl InkApp {
                 }
             }
         }
+        if let Some(path) = self.config_path.as_deref().map(objects::file_beside)
+            && let Err(e) = self.objects.load(&path)
+        {
+            eprintln!("could not read the objects: {e}");
+        }
         self.apply_options_to_config();
         self.apply_config_to_tool();
         self.ui.layers_open = self.config.interface.show_layers;
@@ -237,6 +252,9 @@ impl InkApp {
         }
         if self.options.snap {
             self.config.precision.snap = true;
+        }
+        if self.options.show_drawer {
+            self.config.interface.shapes_drawer = config::DrawerSide::Right;
         }
         if let Some(folder) = &self.options.library_folder {
             self.config.files.library_folder = Some(folder.display().to_string());
@@ -270,12 +288,19 @@ impl InkApp {
                 dial_open: options.show_dial,
                 sheet_open: options.show_menu,
                 precision_open: options.show_precision,
+                shapes_open: options.show_shapes,
+                toolbar_open: options.show_toolbar,
+                text: options
+                    .show_text
+                    .then(|| crate::text_ops::TextEntry::typing("Hello")),
                 settings: options.settings.as_deref().map(Section::named),
+                settings_home: options.settings.as_deref() == Some("home"),
                 ..UiState::default()
             },
             config: Config::default(),
             config_path: None,
             config_dirty: false,
+            objects: Objects::default(),
             library: Library::default(),
             autosave_seen: 0,
             autosave_at: 0.0,
@@ -308,6 +333,7 @@ impl InkApp {
             guides: GuideState::default(),
             artboard: None,
             saved_extras: ink_format::Extras::default(),
+            touch: crate::touch_input::TouchFilter::default(),
             autosave_extras: ink_format::Extras::default(),
             hold: canvas::Hold::default(),
             cache: StrokeCache::default(),
@@ -440,9 +466,42 @@ impl InkApp {
         }
     }
 
+    /// Fills the strips of the window the system covers (its status and navigation bars) with the color of the top
+    /// bar, so the icons the system draws there can be read.
+    fn paint_under_system_bars(ctx: &egui::Context) {
+        let (whole, safe) = (ctx.viewport_rect(), ctx.content_rect());
+        if whole == safe {
+            return;
+        }
+        let painter = ctx.layer_painter(egui::LayerId::background());
+        let strips = [
+            egui::Rect::from_min_max(whole.min, egui::pos2(whole.max.x, safe.min.y)),
+            egui::Rect::from_min_max(egui::pos2(whole.min.x, safe.max.y), whole.max),
+            egui::Rect::from_min_max(
+                egui::pos2(whole.min.x, safe.min.y),
+                egui::pos2(safe.min.x, safe.max.y),
+            ),
+            egui::Rect::from_min_max(
+                egui::pos2(safe.max.x, safe.min.y),
+                egui::pos2(whole.max.x, safe.max.y),
+            ),
+        ];
+        for strip in strips {
+            painter.rect_filled(strip, 0.0, platform::SYSTEM_BAR);
+        }
+    }
+
     /// Lays out one frame. Separate from [`eframe::App::ui`] so tests can run it without a window.
-    pub fn ui_root(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the panels of a frame, one after the other"
+    )]
+    pub fn ui_root(&mut self, root: &mut egui::Ui) {
+        let ctx = root.ctx().clone();
+        // Everything is laid out inside the part of the window the system leaves free (not under Android's status
+        // and navigation bars); the strips it covers are painted by `paint_under_system_bars`.
+        let mut inside = root.new_child(egui::UiBuilder::new().max_rect(ctx.content_rect()));
+        let ui = &mut inside;
         if !self.themed {
             theme::apply(&ctx);
             self.themed = true;
@@ -451,11 +510,17 @@ impl InkApp {
         if (ctx.zoom_factor() - scale).abs() > 1e-3 {
             ctx.set_zoom_factor(scale);
         }
+        shell::begin_frame(&ctx);
         self.chrome.clear();
+        Self::paint_under_system_bars(&ctx);
         if self.tabs.is_empty() {
             self.ui.library_open = true;
         }
         self.handle_dropped_files(&ctx);
+        self.handle_system_files(&ctx);
+        if platform::take_back() {
+            self.go_back(&ctx);
+        }
         self.handle_shortcuts(&ctx);
         self.pan_held = self.hold_pan_active(&ctx);
         // The selection only means something while the select tool is in use.
@@ -472,8 +537,9 @@ impl InkApp {
             self.last_title = title;
         }
 
-        tab_strip::show(ui, self);
+        shell::top_bar(ui, self);
 
+        let mut edit_words = false;
         let canvas_rect = egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| {
@@ -496,39 +562,59 @@ impl InkApp {
                     guides: &mut self.guides,
                     artboard: self.artboard,
                     hold: &mut self.hold,
+                    hidden: self.ui.text.as_ref().map_or(&NO_STROKES, |t| &t.hide),
+                    edit_words: &mut edit_words,
                 };
                 canvas::show(ui, &mut env)
             })
             .inner;
         self.canvas_rect = Some(canvas_rect);
+        if edit_words {
+            self.set_mode(Mode::Select);
+            self.begin_text();
+        }
         self.apply_view_options(canvas_rect);
+        if std::mem::take(&mut self.options.demo_shapes) {
+            self.demo_shapes();
+        }
         self.handle_taps(&ctx);
 
-        self.paint_empty_hint(ui, canvas_rect);
+        if self.ui.text.is_none() {
+            self.paint_empty_hint(ui, canvas_rect);
+        }
 
         // The panels fade out while a stroke is being drawn, when asked to, and come back when the pen lifts.
         let drawing = self.builder.is_some() || self.eraser.is_some();
-        let put_away =
-            (drawing && self.config.interface.hide_while_drawing) || self.ui.panels_hidden;
+        let put_away = (drawing && self.config.interface.hide_while_drawing)
+            || self.ui.panels_hidden
+            || self.ui.text.is_some();
         let visible = !put_away;
         self.chrome_alpha =
             ctx.animate_bool_with_time(egui::Id::unique("chrome_alpha"), visible, 0.2);
-        library_page::show(&ctx, self);
+        shell::library(&ctx, self);
         if self.chrome_alpha > 0.01 {
             hud::show(&ctx, self);
             if !self.ui.library_open {
-                precision::show(&ctx, self);
-                rail::show(&ctx, self);
-                layers_panel::show(&ctx, self);
+                shell::precision(&ctx, self);
+                shell::tools(&ctx, self);
+                shell::layers(&ctx, self);
+                shell::shapes(&ctx, self);
+                shapes_drawer::show(&ctx, self);
+                shell::toolbar_editor(&ctx, self);
                 selection_bar::show(&ctx, self);
                 flyouts::show_dial(&ctx, self);
                 flyouts::show_case(&ctx, self);
                 color_panel::show(&ctx, self);
             }
         }
+        if !self.ui.library_open {
+            text_editor::show(&ctx, self);
+        }
+        shell::overlays(&ctx, self);
         self.close_flyouts_on_outside_press(&ctx);
-        settings::show(&ctx, self);
+        shell::settings(&ctx, self);
         self.autosave_tick(&ctx);
+        self.tell_platform(&ctx);
 
         self.flush_config(&ctx);
         self.drive_screenshot(&ctx);
@@ -579,6 +665,15 @@ impl InkApp {
         }
     }
 
+    /// Tells the system what it asks about: whether a keyboard is wanted, and whether Back would do something here.
+    fn tell_platform(&self, ctx: &egui::Context) {
+        platform::soft_keyboard(
+            ctx.egui_wants_keyboard_input(),
+            ctx.input(|i| i.pointer.any_pressed()),
+        );
+        platform::set_can_go_back(self.can_go_back());
+    }
+
     /// Notes that the settings changed, so they are saved soon.
     pub(crate) fn mark_config_changed(&mut self) {
         self.config_dirty = true;
@@ -587,6 +682,7 @@ impl InkApp {
     /// Writes changed settings to disk, but not while a button is held, so dragging a slider is not a stream
     /// of writes.
     fn flush_config(&mut self, ctx: &egui::Context) {
+        self.flush_objects();
         if !self.config_dirty || ctx.input(|i| i.pointer.any_down()) {
             return;
         }
@@ -595,6 +691,18 @@ impl InkApp {
             && let Err(e) = self.config.save(path)
         {
             eprintln!("could not save the settings: {e}");
+        }
+    }
+
+    /// Writes the person's objects if they changed. A change is a thing done once, so it is written at once.
+    fn flush_objects(&mut self) {
+        if !self.objects.take_changed() {
+            return;
+        }
+        if let Some(path) = self.config_path.as_deref().map(objects::file_beside)
+            && let Err(e) = self.objects.save(&path)
+        {
+            eprintln!("could not save the objects: {e}");
         }
     }
 
@@ -629,6 +737,14 @@ impl InkApp {
     pub(crate) fn open_settings(&mut self, section: Section) {
         self.ui.close_popovers();
         self.ui.settings = Some(section);
+        self.ui.settings_home = false;
+    }
+
+    /// Opens the settings on their landing page: the first section where the sections sit beside their content, the
+    /// list of sections where there is room for only one thing.
+    pub(crate) fn open_settings_home(&mut self) {
+        self.open_settings(Section::Brushes);
+        self.ui.settings_home = true;
     }
 
     /// Puts every setting back to its starting value.
@@ -674,6 +790,57 @@ impl InkApp {
 }
 
 impl InkApp {
+    /// Input from the platform's own touch and key queues (Android): each stylus, finger and palm is told apart and
+    /// turned into the events the rest of the app reads. Nothing is queued on other systems, where the window
+    /// library delivers input.
+    fn android_input(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        crate::touch_input::wake_on_input(ctx);
+        let samples = crate::touch_input::take_pointers();
+        let keys = crate::touch_input::take_keys();
+        let policy = crate::touch_input::Policy {
+            fingers: self.config.input.finger_drawing,
+            palm_rejection: self.config.input.palm_rejection,
+            stylus_device: self.config.input.stylus_seen,
+            pen_hold: self.config.input.pen_hold(),
+        };
+        let now = raw_input.time.unwrap_or(0.0);
+        // A pen held still turns into a drag of the page, with or without new input, so this is asked every frame.
+        let (held, came) = self.touch.tick(now);
+        if came {
+            // What the pen drew while it was held (a dot) is not kept: it was the start of a drag.
+            self.builder = None;
+            self.abandon_gesture();
+        }
+        if samples.is_empty() && keys.is_empty() && held.is_empty() {
+            return;
+        }
+        raw_input.events.extend(held);
+        let canvas = self.canvas_rect;
+        let place = |pos: egui::Pos2| {
+            let over_paper = canvas.is_some_and(|r| r.contains(pos))
+                && ctx
+                    .layer_id_at(pos)
+                    .is_none_or(|layer| layer.order == egui::Order::Background);
+            if over_paper {
+                crate::touch_input::Place::Canvas
+            } else {
+                crate::touch_input::Place::Panel
+            }
+        };
+        let events = self
+            .touch
+            .process(now, &samples, ctx.pixels_per_point(), policy, place);
+        raw_input.events.extend(events);
+        // The first time a stylus touches the screen is remembered: from then on a finger moves the page.
+        if self.touch.stylus_seen() && !self.config.input.stylus_seen {
+            self.config.input.stylus_seen = true;
+            self.mark_config_changed();
+        }
+        for key in &keys {
+            raw_input.events.extend(crate::touch_input::key_events(key));
+        }
+    }
+
     /// Draws a short curve, switches to the select tool, selects it and opens the numbers of the selection (used to
     /// check the selection bar in screenshots).
     fn inject_demo_select(&mut self, input: &mut egui::RawInput) {
@@ -736,9 +903,27 @@ impl eframe::App for InkApp {
         {
             let _ = self.config.save(path);
         }
+        self.flush_objects();
     }
 
-    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.android_input(ctx, raw_input);
+        // Where the system covers the window (Android's bars and keyboard), so panels keep clear of it.
+        let scale = raw_input
+            .viewports
+            .get(&raw_input.viewport_id)
+            .and_then(|v| v.native_pixels_per_point)
+            .filter(|s| *s > 0.0)
+            .unwrap_or(1.0);
+        platform::set_keyboard(ctx, platform::keyboard_pixels() / scale);
+        if let Some([left, top, right, bottom]) = platform::covered_pixels() {
+            raw_input.safe_area_insets = Some(egui::SafeAreaInsets(egui::epaint::MarginF32 {
+                left: left / scale,
+                top: top / scale,
+                right: right / scale,
+                bottom: bottom / scale,
+            }));
+        }
         if self.options.demo_stroke {
             self.inject_demo_stroke(raw_input);
         }
@@ -2590,9 +2775,11 @@ mod tests {
         settle(&mut h, 3);
         assert_eq!(h.app.selection.len(), 0);
         assert!(!h.app.ui.size_fields.open, "no selection, no numbers");
+        // The bar is wide; the round buttons of the top bar are panels too, and are not it.
         let bars = panels(&h);
         assert!(
-            bars.iter().any(|r| r.min.y < 100.0 && r.height() < 60.0),
+            bars.iter()
+                .any(|r| r.min.y < 100.0 && r.height() < 60.0 && r.width() > 100.0),
             "the locked bar: {bars:?}"
         );
         h.frame(vec![press_with(Key::L, true, true, false)]);
@@ -2601,7 +2788,7 @@ mod tests {
         assert!(
             !panels(&h)
                 .iter()
-                .any(|r| r.min.y < 100.0 && r.height() < 60.0),
+                .any(|r| r.min.y < 100.0 && r.height() < 60.0 && r.width() > 100.0),
             "and it goes"
         );
     }
@@ -2783,12 +2970,16 @@ mod tests {
             "and does not turn the paper"
         );
         settle(&mut h, 8);
-        // The panel is the new rectangle above the chips; its button for upright is at its right end.
+        // The panel is the new rectangle above the chips; its button for upright is the second in the first
+        // row under the title, after the field for the angle (the switch for turning with two fingers is below it).
         let panel = panels(&h)
             .into_iter()
             .find(|r| r.max.y < chips[0].min.y && r.width() > 150.0 && r.min.x > 600.0)
             .expect("the turn panel above the chips");
-        let upright = pos2(panel.max.x - 12.0 - 44.0, panel.max.y - 12.0 - 15.0);
+        let upright = pos2(
+            panel.min.x + 12.0 + 88.0 + 8.0 + 44.0,
+            panel.min.y + 12.0 + 16.0 + 8.0 + 15.0,
+        );
         let press = |pressed| Event::PointerButton {
             pos: upright,
             button: PointerButton::Primary,
@@ -4352,5 +4543,296 @@ mod tests {
         h.app.new_document();
         assert_eq!(h.strokes(), 0);
         assert!(!h.app.editor.can_undo());
+    }
+
+    /// A press and a release at `at`, in two frames.
+    fn click(h: &mut Harness, at: egui::Pos2) {
+        let button = |pressed| Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        h.frame(vec![Event::PointerMoved(at)]);
+        h.frame(vec![button(true)]);
+        h.frame(vec![button(false)]);
+    }
+
+    /// Where the middle of the selection is on the screen, and the selection put away, the tool being the pen.
+    fn leave_it_alone(h: &mut Harness) -> egui::Pos2 {
+        let [x0, y0, x1, y1] =
+            crate::tools::selection_bounds(&h.app.editor, &h.app.selection).expect("something");
+        let at = h.app.view.to_screen(ink_core::Point::new(
+            f32::midpoint(x0, x1),
+            f32::midpoint(y0, y1),
+        ));
+        h.app.selection.clear();
+        h.app.tool.mode = Mode::Draw;
+        h.frame(Vec::new());
+        at
+    }
+
+    #[test]
+    fn a_double_touch_on_a_filled_shape_opens_it_for_words_even_with_the_pen_in_use() {
+        let mut h = Harness::new();
+        let ctx = h.ctx.clone();
+        h.app.config.shapes.fill = Some([240, 200, 60]);
+        assert!(h.app.insert_shape(&ctx, "circle"));
+        let at = leave_it_alone(&mut h);
+        let before = h.strokes();
+        click(&mut h, at);
+        click(&mut h, at);
+        let entry = h.app.ui.text.as_ref().expect("the words are open");
+        assert!(!entry.placing && !entry.editing, "written inside the shape");
+        assert_eq!(h.app.selection.len(), before, "the whole shape is picked");
+        assert_eq!(h.strokes(), before, "no dot was left by the first touch");
+    }
+
+    #[test]
+    fn a_double_touch_inside_an_outline_with_nothing_in_it_opens_it_too() {
+        let mut h = Harness::new();
+        let ctx = h.ctx.clone();
+        assert!(h.app.insert_shape(&ctx, "square"));
+        let at = leave_it_alone(&mut h);
+        click(&mut h, at);
+        click(&mut h, at);
+        assert!(h.app.ui.text.is_some(), "the middle of an empty square");
+    }
+
+    #[test]
+    fn a_double_touch_on_words_opens_them_to_be_changed() {
+        let mut h = Harness::new();
+        let ctx = h.ctx.clone();
+        assert!(h.app.write_text(&ctx, "Hello"));
+        let at = leave_it_alone(&mut h);
+        click(&mut h, at);
+        click(&mut h, at);
+        let entry = h.app.ui.text.as_ref().expect("the words are open");
+        assert!(entry.editing);
+        assert_eq!(entry.text, "Hello");
+    }
+
+    #[test]
+    fn a_double_touch_on_words_inside_a_shape_changes_the_words_not_the_shape() {
+        let mut h = Harness::new();
+        let ctx = h.ctx.clone();
+        h.app.config.shapes.fill = Some([240, 200, 60]);
+        assert!(h.app.insert_shape(&ctx, "rectangle"));
+        assert!(h.app.write_text(&ctx, "Hi"));
+        let at = leave_it_alone(&mut h);
+        click(&mut h, at);
+        click(&mut h, at);
+        let entry = h.app.ui.text.as_ref().expect("the words are open");
+        assert!(entry.editing, "the words that were there");
+        assert_eq!(entry.text, "Hi");
+    }
+
+    #[test]
+    fn two_touches_on_empty_paper_are_two_dots_and_open_nothing() {
+        let mut h = Harness::new();
+        let at = pos2(300.0, 300.0);
+        click(&mut h, at);
+        click(&mut h, at);
+        assert!(h.app.ui.text.is_none());
+        assert_eq!(h.strokes(), 2, "both dots stay");
+    }
+
+    #[test]
+    fn two_slow_touches_on_a_shape_are_not_a_double_touch() {
+        let mut h = Harness::new();
+        let ctx = h.ctx.clone();
+        h.app.config.shapes.fill = Some([240, 200, 60]);
+        assert!(h.app.insert_shape(&ctx, "circle"));
+        let at = leave_it_alone(&mut h);
+        click(&mut h, at);
+        for _ in 0..60 {
+            h.frame(Vec::new()); // a whole second
+        }
+        click(&mut h, at);
+        assert!(h.app.ui.text.is_none());
+    }
+
+    #[test]
+    fn the_eraser_is_left_to_erase_even_on_a_double_touch() {
+        let mut h = Harness::new();
+        let ctx = h.ctx.clone();
+        h.app.config.shapes.fill = Some([240, 200, 60]);
+        assert!(h.app.insert_shape(&ctx, "circle"));
+        let at = leave_it_alone(&mut h);
+        h.app.tool.mode = Mode::Erase;
+        click(&mut h, at);
+        click(&mut h, at);
+        assert!(h.app.ui.text.is_none());
+    }
+
+    #[test]
+    fn a_double_touch_on_a_plain_line_is_left_to_the_pen() {
+        let mut h = Harness::new();
+        h.drag(&[(300.0, 300.0), (400.0, 300.0), (500.0, 300.0)]);
+        let before = h.strokes();
+        let on_it = pos2(400.0, 300.0);
+        click(&mut h, on_it);
+        click(&mut h, on_it);
+        assert!(h.app.ui.text.is_none(), "a line is not a figure");
+        assert_eq!(h.strokes(), before + 2, "the two touches are two dots");
+    }
+
+    /// A harness with the drawer of shapes open on the right, and the middle of its first tile.
+    fn with_the_drawer() -> (Harness, egui::Pos2) {
+        let mut h = Harness::new();
+        h.app.config.interface.shapes_drawer = crate::config::DrawerSide::Right;
+        h.frame(Vec::new());
+        h.frame(Vec::new());
+        let drawer = h.app.ui.anchors.drawer.expect("the drawer is open");
+        // The margin, the header, and then the first tile.
+        let tile = pos2(
+            drawer.left() + 12.0 + 30.0,
+            drawer.top() + 12.0 + 40.0 + 30.0,
+        );
+        (h, tile)
+    }
+
+    #[test]
+    fn the_drawer_of_shapes_stays_where_it_was_put_and_keeps_the_paper_to_the_rest() {
+        let (h, _) = with_the_drawer();
+        let drawer = h.app.ui.anchors.drawer.expect("open");
+        let paper = h.app.canvas_rect.expect("paper");
+        assert!(paper.contains_rect(drawer), "inside the paper");
+        assert!(
+            h.app.chrome.iter().any(|r| r.intersects(drawer)),
+            "it counts as a panel"
+        );
+    }
+
+    #[test]
+    fn tapping_a_shape_in_the_drawer_puts_it_on_the_paper_away_from_the_drawer() {
+        let (mut h, tile) = with_the_drawer();
+        click(&mut h, tile);
+        assert!(h.strokes() >= 1, "a shape landed");
+        let drawer = h.app.ui.anchors.drawer.expect("open");
+        let [_, _, x1, _] =
+            crate::tools::selection_bounds(&h.app.editor, &h.app.selection).expect("box");
+        let right_edge = h.app.view.to_screen(ink_core::Point::new(x1, 0.0)).x;
+        assert!(
+            right_edge <= drawer.left() + 1.0,
+            "clear of the drawer: {right_edge}"
+        );
+    }
+
+    #[test]
+    fn dragging_a_shape_out_of_the_drawer_lets_it_go_where_the_pointer_is() {
+        let (mut h, tile) = with_the_drawer();
+        let target = pos2(400.0, 400.0);
+        h.frame(vec![Event::PointerMoved(tile)]);
+        let button = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        h.frame(vec![button(tile, true)]);
+        for i in 1..=10 {
+            let t = i as f32 / 10.0;
+            let at = pos2(
+                tile.x + (target.x - tile.x) * t,
+                tile.y + (target.y - tile.y) * t,
+            );
+            h.frame(vec![Event::PointerMoved(at)]);
+        }
+        assert!(h.app.ui.objects.dragging.is_some(), "it is being carried");
+        h.frame(vec![button(target, false)]);
+        assert!(h.app.ui.objects.dragging.is_none());
+        assert!(h.strokes() >= 1, "it was let go");
+        let [x0, y0, x1, y1] =
+            crate::tools::selection_bounds(&h.app.editor, &h.app.selection).expect("box");
+        let middle = h.app.view.to_screen(ink_core::Point::new(
+            f32::midpoint(x0, x1),
+            f32::midpoint(y0, y1),
+        ));
+        assert!(
+            middle.distance(target) < 3.0,
+            "{middle:?} against {target:?}"
+        );
+    }
+
+    #[test]
+    fn a_shape_let_go_on_the_drawer_again_is_not_put_down() {
+        let (mut h, tile) = with_the_drawer();
+        let back = pos2(tile.x, tile.y + 120.0);
+        let button = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        h.frame(vec![Event::PointerMoved(tile)]);
+        h.frame(vec![button(tile, true)]);
+        h.frame(vec![Event::PointerMoved(pos2(
+            tile.x - 30.0,
+            tile.y + 40.0,
+        ))]);
+        h.frame(vec![Event::PointerMoved(back)]);
+        h.frame(vec![button(back, false)]);
+        assert_eq!(h.strokes(), 0, "nothing was put down");
+        assert!(h.app.ui.objects.dragging.is_none());
+    }
+
+    #[test]
+    fn the_drawer_is_closed_by_its_button_and_remembered_in_the_settings() {
+        let (mut h, _) = with_the_drawer();
+        h.app.config.interface.shapes_drawer = crate::config::DrawerSide::Off;
+        h.frame(Vec::new());
+        assert!(h.app.ui.anchors.drawer.is_none());
+        let text = serde_json::to_string(&h.app.config).expect("written");
+        let back: crate::config::Config = serde_json::from_str(&text).expect("read");
+        assert_eq!(back.interface.shapes_drawer, crate::config::DrawerSide::Off);
+    }
+
+    #[test]
+    fn docking_the_shapes_opens_the_drawer_and_puts_the_menu_away() {
+        let mut h = Harness::new();
+        h.app.ui.toggle_shapes();
+        h.app.dock_shapes();
+        assert_eq!(
+            h.app.config.interface.shapes_drawer,
+            crate::config::DrawerSide::Right
+        );
+        assert!(!h.app.ui.shapes_open);
+    }
+
+    #[test]
+    fn a_shape_is_let_go_where_the_finger_was_even_though_the_pointer_is_gone_as_it_lifts() {
+        let (mut h, tile) = with_the_drawer();
+        let target = pos2(420.0, 380.0);
+        let button = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        h.frame(vec![Event::PointerMoved(tile)]);
+        h.frame(vec![button(tile, true)]);
+        for i in 1..=10 {
+            let t = i as f32 / 10.0;
+            let at = pos2(
+                tile.x + (target.x - tile.x) * t,
+                tile.y + (target.y - tile.y) * t,
+            );
+            h.frame(vec![Event::PointerMoved(at)]);
+        }
+        h.frame(vec![button(target, false), Event::PointerGone]);
+        h.frame(Vec::new());
+        assert!(h.app.ui.objects.dragging.is_none(), "not left carrying");
+        assert!(h.strokes() >= 1, "it was put down");
+        let [x0, y0, x1, y1] =
+            crate::tools::selection_bounds(&h.app.editor, &h.app.selection).expect("box");
+        let middle = h.app.view.to_screen(ink_core::Point::new(
+            f32::midpoint(x0, x1),
+            f32::midpoint(y0, y1),
+        ));
+        assert!(
+            middle.distance(target) < 3.0,
+            "{middle:?} against {target:?}"
+        );
     }
 }

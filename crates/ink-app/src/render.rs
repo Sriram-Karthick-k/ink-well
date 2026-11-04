@@ -150,6 +150,26 @@ fn thick_line(painter: &Painter, pts: &[Pos2], width: f32, color: Color32) {
     painter.add(Shape::mesh(mesh));
 }
 
+/// The inside of the polygon `points`, in canvas units, in one flat color, with a feathered line round the edge so it is
+/// not jagged. Fewer than three points are a line, as they were before regions.
+fn region(painter: &Painter, view: &ViewState, points: &[Point], color: Color32) {
+    let triangles = ink_brush::fill::triangulate(points);
+    if triangles.is_empty() {
+        let (pts, _) = to_screen(view, points);
+        solid(painter, &pts, 1.0, color, true);
+        return;
+    }
+    let mut mesh = Mesh::default();
+    for v in triangles.as_chunks::<2>().0 {
+        mesh.colored_vertex(view.to_screen(Point::new(v[0], v[1])), color);
+    }
+    mesh.indices = (0..mesh.vertices.len() as u32).collect();
+    painter.add(Shape::mesh(mesh));
+    let mut edge: Vec<Pos2> = points.iter().map(|p| view.to_screen(*p)).collect();
+    edge.push(edge[0]);
+    painter.add(Shape::line(edge, PathStroke::new(1.0, color)));
+}
+
 /// One filled ribbon (left edge, right edge, round caps) so a pressure-varying stroke has no joins.
 fn ribbon(painter: &Painter, pts: &[Pos2], widths: &[f32], color: Color32) {
     let n = pts.len();
@@ -299,7 +319,7 @@ pub fn draw_stroke(
 
     match stroke.pen {
         Pen::Wire => solid(painter, &pts, px(w.min(1.5)), base, true),
-        Pen::Fill => solid(painter, &pts, px(1.0), base, true),
+        Pen::Fill => region(painter, view, &path.points, base),
         Pen::Marker => solid(painter, &pts, px(w), base.gamma_multiply(0.55), false),
         Pen::Watercolor => solid(painter, &pts, px(w), base.gamma_multiply(0.5), false),
         Pen::SoftPencil => solid(painter, &pts, px(w), base.gamma_multiply(0.85), false),

@@ -8,10 +8,16 @@ use ink_format::WriteOptions;
 
 use crate::app::InkApp;
 use crate::library;
+use crate::system_files::{self, Event, Purpose};
 use ink_format::Extras;
 
-/// How long after the last change a note saves itself.
-const AUTOSAVE_SECONDS: f64 = 1.5;
+/// How long after the last change a note saves itself. Android may stop an app in the background without a word, so
+/// there it saves almost at once.
+const AUTOSAVE_SECONDS: f64 = if cfg!(target_os = "android") {
+    0.4
+} else {
+    1.5
+};
 /// How long a status message stays on screen.
 pub(crate) const MESSAGE_SECONDS: f64 = 6.0;
 
@@ -143,6 +149,8 @@ impl InkApp {
 
     /// Opens the notes page.
     pub(crate) fn open_library(&mut self, ctx: &egui::Context) {
+        // Words that were being typed are finished, not left waiting over the drawing for when it is opened again.
+        self.commit_text(ctx);
         self.flush_autosave(ctx);
         self.ui.close_popovers();
         self.ui.library_open = true;
@@ -192,7 +200,9 @@ impl InkApp {
 
     #[cfg(target_os = "android")]
     pub(crate) fn import_notes(&mut self, ctx: &egui::Context) {
-        self.notify(ctx, "Importing files is not available on Android yet.");
+        if let Err(e) = system_files::pick_files(Purpose::Import) {
+            self.notify(ctx, e);
+        }
     }
 
     /// Asks which file to open.
@@ -208,7 +218,9 @@ impl InkApp {
 
     #[cfg(target_os = "android")]
     pub(crate) fn request_open(&mut self, ctx: &egui::Context) {
-        self.notify(ctx, "Opening files is not available on Android yet.");
+        if let Err(e) = system_files::pick_files(Purpose::Open) {
+            self.notify(ctx, e);
+        }
     }
 
     /// Saves to the current file, or asks where to save a drawing that has none.
@@ -234,9 +246,59 @@ impl InkApp {
         }
     }
 
+    /// Asks where to save a copy, with the system's own picker. The drawing itself stays in the Library, which saves
+    /// by itself; this is how it leaves the app, to Downloads, Documents or a cloud drive.
     #[cfg(target_os = "android")]
     pub(crate) fn save_as(&mut self, ctx: &egui::Context) {
-        self.notify(ctx, "Saving files is not available on Android yet.");
+        let name = format!("{}.ink", self.document_name());
+        let asked = self
+            .encode()
+            .and_then(|bytes| system_files::pick_save(&name, &bytes));
+        if let Err(e) = asked {
+            self.notify(ctx, format!("Could not save: {e}"));
+        }
+    }
+
+    /// Reads what the system reported since the last frame, and saves at once if the app was sent to the background.
+    pub(crate) fn handle_system_files(&mut self, ctx: &egui::Context) {
+        if system_files::take_paused() {
+            self.flush_autosave(ctx);
+        }
+        for event in system_files::take() {
+            self.apply_system_event(ctx, event);
+        }
+    }
+
+    /// Does what the system's report asks: a picked file goes into the Library (and is opened, if it was asked to be),
+    /// and a saved copy is announced.
+    pub(crate) fn apply_system_event(&mut self, ctx: &egui::Context, event: Event) {
+        match event {
+            Event::Picked {
+                purpose,
+                name,
+                bytes,
+            } => match library::import_bytes(&name, &bytes, &self.drawing_folder()) {
+                Ok(path) => {
+                    self.refresh_library(ctx);
+                    match purpose {
+                        Purpose::Open => {
+                            self.open_in_tab(ctx, &path);
+                        }
+                        Purpose::Import => {
+                            let imported = drawing_name(Some(&path));
+                            self.notify(ctx, format!("Imported {imported}"));
+                        }
+                    }
+                }
+                Err(e) => self.notify(ctx, e),
+            },
+            Event::Saved { ok: true, name } => {
+                self.notify(ctx, format!("Saved a copy as {name}"));
+            }
+            Event::Saved { ok: false, .. } => {
+                self.notify(ctx, "Could not save the copy.");
+            }
+        }
     }
 
     fn save_to(&mut self, ctx: &egui::Context, path: &Path) {
@@ -249,20 +311,25 @@ impl InkApp {
         }
     }
 
+    /// The drawing as the bytes of a `.ink` file.
+    pub(crate) fn encode(&self) -> Result<Vec<u8>, String> {
+        ink_format::write(
+            self.editor.document(),
+            &self.extras(),
+            &WriteOptions {
+                now_unix_ms: now_ms(),
+            },
+        )
+        .map_err(|e| e.to_string())
+    }
+
     /// Writes the drawing to `path` through a temporary file, so a failure cannot damage an existing file.
     pub(crate) fn write_file(&mut self, path: &Path) -> Result<(), String> {
         if let Some(folder) = path.parent().filter(|f| !f.as_os_str().is_empty()) {
             std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
         }
         let extras = self.extras();
-        let bytes = ink_format::write(
-            self.editor.document(),
-            &extras,
-            &WriteOptions {
-                now_unix_ms: now_ms(),
-            },
-        )
-        .map_err(|e| e.to_string())?;
+        let bytes = self.encode()?;
         let mut temporary = path.as_os_str().to_owned();
         temporary.push(".tmp");
         let temporary = PathBuf::from(temporary);
@@ -307,6 +374,97 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("inkwell-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         dir.join(name)
+    }
+
+    /// An app that keeps its Library in a fresh folder named `name`, and that folder.
+    fn app_with_library(name: &str) -> (InkApp, PathBuf) {
+        let folder = temp_path(name);
+        let _ = std::fs::remove_dir_all(&folder);
+        let mut app = app();
+        app.config.files.library_folder = Some(folder.display().to_string());
+        (app, folder)
+    }
+
+    fn picked(purpose: Purpose, name: &str, bytes: Vec<u8>) -> Event {
+        Event::Picked {
+            purpose,
+            name: name.to_owned(),
+            bytes,
+        }
+    }
+
+    fn message(app: &InkApp) -> String {
+        app.current_message(0.5).unwrap_or_default().to_owned()
+    }
+
+    #[test]
+    fn a_drawing_picked_to_open_goes_into_the_library_and_opens() {
+        let mut source = app();
+        draw_something(&mut source);
+        let bytes = source.encode().expect("bytes");
+        let (mut app, folder) = app_with_library("picked-open");
+        let ctx = egui::Context::default();
+        app.apply_system_event(&ctx, picked(Purpose::Open, "Sketch.ink", bytes));
+        assert!(folder.join("Sketch.ink").exists(), "it is in the Library");
+        assert_eq!(app.document_name(), "Sketch", "and open");
+        let strokes: usize = app
+            .editor
+            .document()
+            .layers
+            .iter()
+            .map(|l| l.strokes.len())
+            .sum();
+        assert_eq!(strokes, 1, "with what was drawn in it");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn a_drawing_picked_to_import_goes_into_the_library_and_says_so() {
+        let mut source = app();
+        draw_something(&mut source);
+        let bytes = source.encode().expect("bytes");
+        let (mut app, folder) = app_with_library("picked-import");
+        let ctx = egui::Context::default();
+        app.apply_system_event(&ctx, picked(Purpose::Import, "Plan.ink", bytes));
+        assert!(folder.join("Plan.ink").exists());
+        assert_eq!(message(&app), "Imported Plan");
+        assert_ne!(app.document_name(), "Plan", "it is not opened");
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_drawing_is_refused_in_words() {
+        let (mut app, folder) = app_with_library("picked-refused");
+        let ctx = egui::Context::default();
+        app.apply_system_event(&ctx, picked(Purpose::Open, "Notes.txt", b"hello".to_vec()));
+        assert!(
+            message(&app).contains("Notes.txt is not an inkwell drawing"),
+            "{}",
+            message(&app)
+        );
+        assert!(!folder.exists(), "nothing was written");
+    }
+
+    #[test]
+    fn a_saved_copy_is_announced_and_a_failed_one_is_too() {
+        let (mut app, _) = app_with_library("saved-copy");
+        let ctx = egui::Context::default();
+        app.apply_system_event(
+            &ctx,
+            Event::Saved {
+                ok: true,
+                name: "Plan.ink".to_owned(),
+            },
+        );
+        assert_eq!(message(&app), "Saved a copy as Plan.ink");
+        app.apply_system_event(
+            &ctx,
+            Event::Saved {
+                ok: false,
+                name: String::new(),
+            },
+        );
+        assert_eq!(message(&app), "Could not save the copy.");
     }
 
     #[test]

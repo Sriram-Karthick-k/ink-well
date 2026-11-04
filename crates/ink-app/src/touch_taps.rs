@@ -1,4 +1,5 @@
-//! Taps with several fingers at once, a way to undo, redo and so on without reaching for a button.
+//! Taps with several fingers at once, a way to undo, redo and so on without reaching for a button, and two taps of one
+//! finger close together, which open a shape or words for writing.
 //!
 //! A tap is every finger going down and coming up again within a moment, none of them having moved far. The
 //! number of fingers is the most that were down together. Two fingers that pinch, pan or rest are not a tap.
@@ -11,6 +12,10 @@ use eframe::egui::{Event, Pos2, TouchPhase};
 const MAX_TAP_SECONDS: f64 = 0.4;
 /// A finger that goes further than this from where it came down, in points, is moving and not tapping.
 const MAX_TRAVEL: f32 = 24.0;
+/// Two taps of one finger are a double tap when the second comes this soon after the first (in seconds) and this near it
+/// (in points).
+const DOUBLE_SECONDS: f64 = 0.45;
+const DOUBLE_REACH: f32 = 32.0;
 
 /// Follows the touches of the screen and says when a tap with more than one finger has happened.
 #[derive(Debug, Default)]
@@ -23,9 +28,31 @@ pub struct TapTracker {
     since: f64,
     /// Nothing so far rules this out as a tap.
     steady: bool,
+    /// When and where the last tap of one finger was, for a second to follow it.
+    last_single: Option<(f64, Pos2)>,
+    /// Where a double tap of one finger was, until it is taken.
+    double: Option<Pos2>,
 }
 
 impl TapTracker {
+    /// A tap of one finger at `at`: the second of two close together is a double tap.
+    fn single_tap(&mut self, now: f64, at: Pos2) {
+        match self.last_single {
+            Some((then, there))
+                if now - then <= DOUBLE_SECONDS && there.distance(at) <= DOUBLE_REACH =>
+            {
+                self.double = Some(at);
+                self.last_single = None;
+            }
+            _ => self.last_single = Some((now, at)),
+        }
+    }
+
+    /// Where a double tap of one finger was, once.
+    pub fn take_double(&mut self) -> Option<Pos2> {
+        self.double.take()
+    }
+
     /// Takes the touch events of one frame (`now` is the time of the frame) and returns how many fingers made a
     /// tap that was completed in them, if one was.
     pub fn update(&mut self, events: &[Event], now: f64) -> Option<usize> {
@@ -56,8 +83,14 @@ impl TapTracker {
                 TouchPhase::End => {
                     self.fingers.remove(&id.0);
                     if self.fingers.is_empty() {
-                        if self.steady && self.most >= 2 && now - self.since <= MAX_TAP_SECONDS {
+                        let quick = self.steady && now - self.since <= MAX_TAP_SECONDS;
+                        if quick && self.most >= 2 {
                             tapped = Some(self.most);
+                        }
+                        if quick && self.most == 1 {
+                            self.single_tap(now, *pos);
+                        } else {
+                            self.last_single = None;
                         }
                         self.most = 0;
                     }
@@ -213,5 +246,61 @@ mod tests {
     fn events_that_are_not_touches_are_ignored() {
         let mut taps = TapTracker::default();
         assert_eq!(taps.update(&[Event::Copy, Event::PointerGone], 1.0), None);
+    }
+
+    fn tap_of_one(taps: &mut TapTracker, x: f32, y: f32, at: f64) {
+        taps.update(&[touch(1, TouchPhase::Start, x, y)], at);
+        taps.update(&[touch(1, TouchPhase::End, x, y)], at + 0.05);
+    }
+
+    #[test]
+    fn two_quick_taps_of_one_finger_close_together_are_a_double_tap_taken_once() {
+        let mut taps = TapTracker::default();
+        tap_of_one(&mut taps, 200.0, 300.0, 1.0);
+        assert_eq!(taps.take_double(), None, "one tap is not a double tap");
+        tap_of_one(&mut taps, 205.0, 302.0, 1.25);
+        assert_eq!(taps.take_double(), Some(pos2(205.0, 302.0)));
+        assert_eq!(taps.take_double(), None, "taken once");
+        tap_of_one(&mut taps, 205.0, 302.0, 1.4);
+        assert_eq!(taps.take_double(), None, "a third tap starts over");
+    }
+
+    #[test]
+    fn taps_too_slow_or_too_far_apart_or_of_two_fingers_are_not_a_double_tap() {
+        let mut taps = TapTracker::default();
+        tap_of_one(&mut taps, 200.0, 300.0, 1.0);
+        tap_of_one(&mut taps, 200.0, 300.0, 2.0);
+        assert_eq!(taps.take_double(), None, "too slow");
+        let mut taps = TapTracker::default();
+        tap_of_one(&mut taps, 200.0, 300.0, 1.0);
+        tap_of_one(&mut taps, 400.0, 300.0, 1.2);
+        assert_eq!(taps.take_double(), None, "too far apart");
+        let mut taps = TapTracker::default();
+        tap_of_one(&mut taps, 200.0, 300.0, 1.0);
+        taps.update(
+            &[
+                touch(1, TouchPhase::Start, 200.0, 300.0),
+                touch(2, TouchPhase::Start, 260.0, 300.0),
+            ],
+            1.2,
+        );
+        taps.update(
+            &[
+                touch(1, TouchPhase::End, 200.0, 300.0),
+                touch(2, TouchPhase::End, 260.0, 300.0),
+            ],
+            1.25,
+        );
+        assert_eq!(taps.take_double(), None, "two fingers are another tap");
+    }
+
+    #[test]
+    fn a_finger_that_moves_or_stays_down_is_not_tapping() {
+        let mut taps = TapTracker::default();
+        tap_of_one(&mut taps, 200.0, 300.0, 1.0);
+        taps.update(&[touch(1, TouchPhase::Start, 200.0, 300.0)], 1.2);
+        taps.update(&[touch(1, TouchPhase::Move, 300.0, 300.0)], 1.25);
+        taps.update(&[touch(1, TouchPhase::End, 300.0, 300.0)], 1.3);
+        assert_eq!(taps.take_double(), None, "a drag");
     }
 }

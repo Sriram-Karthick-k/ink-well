@@ -7,6 +7,7 @@
 //! How a brush's parameters translate into stamp spacing, size and opacity is reverse-engineered and
 //! partly assumed; each assumption is listed in [`stamps`].
 
+pub mod fill;
 pub mod grain;
 pub mod params;
 pub mod pens;

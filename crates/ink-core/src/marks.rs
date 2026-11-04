@@ -1,24 +1,68 @@
-//! Marks on strokes that are not part of what is drawn: which are locked, and which are grouped.
+//! Marks on strokes that are not part of what is drawn: which are locked, which are grouped, and which are letters.
 //!
 //! They are saved with the drawing, in its extras. A locked stroke can be neither selected, erased, nudged nor
 //! sliced; the strokes of a group are selected together.
 
 use std::collections::HashSet;
 
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// The locked strokes and the groups of a drawing, by stroke id.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Text that was written on the drawing. The letters are strokes like any other, so they can be selected, moved,
+/// resized and erased; this remembers what they say, so the words can be changed later.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Label {
+    pub text: String,
+    /// How tall the letters were made, in canvas units, per em.
+    pub size: f32,
+    /// How tall all the letters together were when they were made, to tell how much they have been scaled since.
+    pub height: f32,
+    /// The strokes that make the letters.
+    pub ids: Vec<Uuid>,
+}
+
+/// The locked strokes, the groups and the labels of a drawing, by stroke id.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Marks {
     locked: HashSet<Uuid>,
     /// Each group has at least two strokes, and no stroke is in two.
     groups: Vec<Vec<Uuid>>,
+    /// Each stroke is in at most one label.
+    labels: Vec<Label>,
 }
 
 impl Marks {
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.locked.is_empty() && self.groups.is_empty()
+        self.locked.is_empty() && self.groups.is_empty() && self.labels.is_empty()
+    }
+
+    // --- labels -------------------------------------------------------------------------------
+
+    #[must_use]
+    pub fn labels(&self) -> &[Label] {
+        &self.labels
+    }
+
+    /// The label the stroke `id` is a letter of, if it is one.
+    #[must_use]
+    pub fn label_of(&self, id: Uuid) -> Option<&Label> {
+        self.labels.iter().find(|l| l.ids.contains(&id))
+    }
+
+    /// Keeps `label`, and forgets any other label that shares a stroke with it.
+    pub fn set_label(&mut self, label: Label) {
+        self.labels
+            .retain(|other| !other.ids.iter().any(|id| label.ids.contains(id)));
+        if !label.ids.is_empty() {
+            self.labels.push(label);
+        }
+    }
+
+    /// Forgets the label that the stroke `id` is a letter of, and returns it.
+    pub fn remove_label_of(&mut self, id: Uuid) -> Option<Label> {
+        let at = self.labels.iter().position(|l| l.ids.contains(&id))?;
+        Some(self.labels.remove(at))
     }
 
     // --- locks --------------------------------------------------------------------------------
@@ -130,6 +174,21 @@ impl Marks {
             g.retain(|id| exists(*id));
         }
         self.groups.retain(|g| g.len() >= 2);
+        for label in &mut self.labels {
+            label.ids.retain(|id| exists(*id));
+        }
+        self.labels.retain(|l| !l.ids.is_empty());
+    }
+
+    /// These labels, read from a file, as the drawing's: one that shares a stroke with another is dropped.
+    #[must_use]
+    pub fn with_labels(mut self, labels: Vec<Label>) -> Self {
+        for label in labels {
+            if !label.ids.iter().any(|id| self.label_of(*id).is_some()) {
+                self.set_label(label);
+            }
+        }
+        self
     }
 
     /// Marks read from a file: ids may repeat or be in two groups, and are put right. Groups of one are dropped.
@@ -138,6 +197,7 @@ impl Marks {
         let mut marks = Self {
             locked: locked.into_iter().collect(),
             groups: Vec::new(),
+            labels: Vec::new(),
         };
         let mut taken: HashSet<Uuid> = HashSet::new();
         for g in groups {
@@ -265,5 +325,67 @@ mod tests {
         assert_eq!(marks.locked(), vec![id(1)]);
         // 2 is in the first group only; 3 is left alone in the second, which is dropped; 4 alone is dropped.
         assert_eq!(marks.groups(), [vec![id(1), id(2)], vec![id(5), id(6)]]);
+    }
+
+    fn label(text: &str, ids: &[u128]) -> Label {
+        Label {
+            text: text.to_owned(),
+            size: 24.0,
+            height: 20.0,
+            ids: ids.iter().map(|n| id(*n)).collect(),
+        }
+    }
+
+    #[test]
+    fn a_label_is_found_from_any_of_its_letters() {
+        let mut marks = Marks::default();
+        marks.set_label(label("Hi", &[1, 2, 3]));
+        assert_eq!(marks.label_of(id(2)).map(|l| l.text.as_str()), Some("Hi"));
+        assert!(marks.label_of(id(9)).is_none());
+        assert!(!marks.is_empty());
+    }
+
+    #[test]
+    fn a_new_label_replaces_the_one_it_shares_letters_with() {
+        let mut marks = Marks::default();
+        marks.set_label(label("Old", &[1, 2]));
+        marks.set_label(label("New", &[2, 3]));
+        assert_eq!(marks.labels().len(), 1);
+        assert_eq!(marks.labels()[0].text, "New");
+    }
+
+    #[test]
+    fn a_label_with_no_letters_is_not_kept() {
+        let mut marks = Marks::default();
+        marks.set_label(label("Nothing", &[]));
+        assert_eq!(marks.labels().len(), 0);
+    }
+
+    #[test]
+    fn a_label_loses_letters_that_are_gone_and_is_gone_with_the_last() {
+        let mut marks = Marks::default();
+        marks.set_label(label("Hi", &[1, 2]));
+        marks.prune(|i| i == id(1));
+        assert_eq!(marks.labels()[0].ids, vec![id(1)]);
+        marks.prune(|_| false);
+        assert_eq!(marks.labels().len(), 0);
+    }
+
+    #[test]
+    fn taking_a_label_away_gives_it_back() {
+        let mut marks = Marks::default();
+        marks.set_label(label("Hi", &[1, 2]));
+        assert_eq!(
+            marks.remove_label_of(id(1)).map(|l| l.text),
+            Some("Hi".to_owned())
+        );
+        assert!(marks.remove_label_of(id(1)).is_none());
+    }
+
+    #[test]
+    fn labels_read_from_a_file_that_share_letters_keep_only_the_first() {
+        let marks = Marks::default().with_labels(vec![label("A", &[1, 2]), label("B", &[2, 3])]);
+        assert_eq!(marks.labels().len(), 1);
+        assert_eq!(marks.labels()[0].text, "A");
     }
 }

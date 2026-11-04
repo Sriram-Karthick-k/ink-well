@@ -4,6 +4,7 @@
 //! and unknown or missing fields are tolerated, so a file written by an older or newer version still loads.
 //! Values are clamped after loading, so a hand-edited file cannot put the app in an unusable state.
 
+use crate::touch_input::FingerDrawing;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -204,8 +205,24 @@ pub struct InputConfig {
     pub zoom_enabled: bool,
     /// Zooming close to a round level (25%, 50%, 100%, 200%, 400%, 800%) lands on it.
     pub zoom_snap: bool,
-    /// The canvas can be turned (two fingers twisting, and the turn keys). Off, it stays as it is.
+    /// The canvas can be turned (two fingers twisting, the turn keys and the typed angle). Off, it stays as it is.
     pub rotation_enabled: bool,
+    /// Two fingers also turn the canvas when they twist. Off, two fingers only move and zoom it, so a hand moving
+    /// the page while writing never tilts it; the turn keys and the typed angle still turn it.
+    pub rotate_with_fingers: bool,
+    /// Whether a finger draws or only moves the page (a stylus always draws).
+    #[serde(rename = "fingers")]
+    pub finger_drawing: FingerDrawing,
+    /// Holding a pen still where it touched the paper moves the page with the pen instead of drawing. A stroke that
+    /// has begun to move is never turned into one.
+    pub pen_hold_to_pan: bool,
+    /// How long the pen is held for that, in seconds, between `HOLD_SECONDS`.
+    pub pen_hold_seconds: f32,
+    /// A stylus has been used on this device. Remembered, so that with `Automatic` a finger draws until the first
+    /// time a stylus touches the screen (a phone has none) and moves the page from then on.
+    pub stylus_seen: bool,
+    /// Ignore a palm resting on the screen: a large contact, and any touch while the stylus is near.
+    pub palm_rejection: bool,
     /// Turning the canvas to within a few degrees of a multiple of 15 lands on it.
     pub rotation_snap: bool,
     /// The pressure that counts as the lightest touch and the hardest, `0.0..=1.0`. Pressure outside them is
@@ -218,6 +235,23 @@ pub struct InputConfig {
     pub four_finger_tap: TapAction,
 }
 
+impl InputConfig {
+    /// The shortest and the longest a pen may be asked to be held for.
+    pub const HOLD_SECONDS: (f32, f32) = (0.5, 5.0);
+
+    /// How long a pen is held still to move the page, or `None` where that is switched off. Kept between the least
+    /// and the most, so a file with nonsense in it never makes every touch a drag.
+    #[must_use]
+    pub fn pen_hold(&self) -> Option<f64> {
+        self.pen_hold_to_pan.then(|| {
+            f64::from(
+                self.pen_hold_seconds
+                    .clamp(Self::HOLD_SECONDS.0, Self::HOLD_SECONDS.1),
+            )
+        })
+    }
+}
+
 impl Default for InputConfig {
     fn default() -> Self {
         Self {
@@ -227,6 +261,12 @@ impl Default for InputConfig {
             zoom_enabled: true,
             zoom_snap: true,
             rotation_enabled: true,
+            rotate_with_fingers: false,
+            finger_drawing: FingerDrawing::Always,
+            stylus_seen: false,
+            pen_hold_to_pan: true,
+            pen_hold_seconds: 2.0,
+            palm_rejection: true,
             rotation_snap: true,
             pressure_low: 0.0,
             pressure_high: 1.0,
@@ -363,6 +403,11 @@ pub struct InterfaceConfig {
     pub show_layers: bool,
     /// The pens on the rail, by brush key. Choosing another pen swaps it in for the last one.
     pub rail: Vec<String>,
+    /// Which side of the paper the drawer of shapes is kept open on, if it is.
+    pub shapes_drawer: DrawerSide,
+    /// What is on the tool bar of a touch device, in order, by key (see [`crate::toolbar`]). A key nobody knows is
+    /// skipped, and it is the person who decides what stays and in what order.
+    pub toolbar: Vec<String>,
 }
 
 /// The fewest and the most places the pen rail can have.
@@ -379,6 +424,53 @@ impl Default for InterfaceConfig {
             hide_while_drawing: true,
             show_layers: false,
             rail: DEFAULT_RAIL.iter().map(|k| (*k).to_owned()).collect(),
+            shapes_drawer: DrawerSide::Off,
+            toolbar: crate::toolbar::DEFAULT
+                .iter()
+                .map(|k| (*k).to_owned())
+                .collect(),
+        }
+    }
+}
+
+/// Where the drawer of shapes is kept open.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DrawerSide {
+    /// Not open: the shapes are in the menu.
+    #[default]
+    Off,
+    Left,
+    Right,
+}
+
+/// How a shape is put on the paper.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShapesConfig {
+    /// The color of the inside of a closed shape, or `None` to leave it empty.
+    pub fill: Option<[u8; 3]>,
+    /// Draw the outline of a shape. A shape that is filled may have none.
+    pub outline: bool,
+    /// How wide a shape is when it is put down, as a part of the width of the paper on the screen.
+    pub size: f32,
+}
+
+impl ShapesConfig {
+    pub const SIZE_RANGE: (f32, f32) = (0.1, 0.8);
+
+    fn clamped(mut self) -> Self {
+        self.size = self.size.clamp(Self::SIZE_RANGE.0, Self::SIZE_RANGE.1);
+        self
+    }
+}
+
+impl Default for ShapesConfig {
+    fn default() -> Self {
+        Self {
+            fill: None,
+            outline: true,
+            size: 0.3,
         }
     }
 }
@@ -640,6 +732,7 @@ pub struct Config {
     pub measurement: ink_core::units::Measurement,
     pub tools: ToolsConfig,
     pub interface: InterfaceConfig,
+    pub shapes: ShapesConfig,
     pub files: FilesConfig,
     pub rendering: RenderingConfig,
     pub colors: ColorsConfig,
@@ -771,6 +864,7 @@ impl Config {
         self.interface.scale = self.interface.scale.clamp(Self::MIN_SCALE, Self::MAX_SCALE);
         self.colors.recent.truncate(RECENT_COLORS);
         self.tools = self.tools.clamped();
+        self.shapes = self.shapes.clamped();
         self.input = self.input.clamped();
         self.canvas.grid_divisions = self.canvas.grid_divisions.clamp(1, 16);
         self.canvas.line_weight = self.canvas.line_weight.clamp(0.5, 3.0);
@@ -837,9 +931,34 @@ impl Config {
     }
 }
 
-/// The notes folder when none is chosen: `inkwell` inside the user's Documents.
+/// The folders a platform without a home folder (Android) gives the app.
+static APP_DIRS: std::sync::OnceLock<AppDirs> = std::sync::OnceLock::new();
+
+/// Where the settings and the drawings are kept when the platform says so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppDirs {
+    /// The folder of the settings file.
+    pub config: PathBuf,
+    /// The folder the notes are kept in.
+    pub drawings: PathBuf,
+}
+
+/// Tells the app where to keep its settings and drawings, before it starts. The first call counts.
+#[cfg_attr(
+    not(target_os = "android"),
+    allow(dead_code, reason = "only Android has no home folder")
+)]
+pub fn set_app_dirs(dirs: AppDirs) {
+    let _ = APP_DIRS.set(dirs);
+}
+
+/// The notes folder when none is chosen: the folder the platform gave the app, or `inkwell` inside the user's
+/// Documents.
 #[must_use]
 pub fn default_library_folder() -> Option<PathBuf> {
+    if let Some(dirs) = APP_DIRS.get() {
+        return Some(dirs.drawings.clone());
+    }
     let home = if cfg!(windows) {
         std::env::var_os("USERPROFILE")
     } else {
@@ -851,6 +970,9 @@ pub fn default_library_folder() -> Option<PathBuf> {
 /// Where the settings file lives on this machine, if a suitable folder can be found.
 #[must_use]
 pub fn default_path() -> Option<PathBuf> {
+    if let Some(dirs) = APP_DIRS.get() {
+        return Some(dirs.config.join("config.json"));
+    }
     let base = if cfg!(windows) {
         std::env::var_os("APPDATA").map(PathBuf::from)
     } else if cfg!(target_os = "macos") {
@@ -1160,5 +1282,66 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn a_pen_is_held_for_two_seconds_to_move_the_page_unless_that_is_off() {
+        let mut input = InputConfig::default();
+        assert_eq!(
+            input.pen_hold(),
+            Some(2.0),
+            "on to begin with, for two seconds"
+        );
+        input.pen_hold_to_pan = false;
+        assert_eq!(input.pen_hold(), None);
+    }
+
+    #[test]
+    fn the_hold_is_kept_between_the_least_and_the_most_whatever_the_file_says() {
+        let short = InputConfig {
+            pen_hold_seconds: 0.0,
+            ..InputConfig::default()
+        };
+        assert_eq!(
+            short.pen_hold(),
+            Some(f64::from(InputConfig::HOLD_SECONDS.0))
+        );
+        let long = InputConfig {
+            pen_hold_seconds: 600.0,
+            ..InputConfig::default()
+        };
+        assert_eq!(
+            long.pen_hold(),
+            Some(f64::from(InputConfig::HOLD_SECONDS.1))
+        );
+    }
+
+    #[test]
+    fn an_old_settings_file_without_the_hold_gets_it_on() {
+        let input: InputConfig = serde_json::from_str("{\"use_pressure\": false}").expect("read");
+        assert!(!input.use_pressure);
+        assert_eq!(input.pen_hold(), Some(2.0));
+    }
+
+    #[test]
+    fn fingers_work_on_the_paper_by_default_and_a_setting_saved_before_that_does_not_take_it_back()
+    {
+        assert_eq!(
+            Config::default().input.finger_drawing,
+            FingerDrawing::Always
+        );
+        // Settings written before fingers drew by default kept the old choice under another name.
+        let old: Config =
+            serde_json::from_str(r#"{"input":{"finger_drawing":"Automatic"}}"#).expect("read");
+        assert_eq!(old.input.finger_drawing, FingerDrawing::Always);
+        let chosen: Config =
+            serde_json::from_str(r#"{"input":{"fingers":"Never"}}"#).expect("read");
+        assert_eq!(
+            chosen.input.finger_drawing,
+            FingerDrawing::Never,
+            "a choice made now is kept"
+        );
+        let text = serde_json::to_string(&Config::default()).expect("written");
+        assert!(text.contains("\"fingers\":\"Always\""));
     }
 }

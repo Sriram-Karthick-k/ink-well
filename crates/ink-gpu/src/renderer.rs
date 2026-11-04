@@ -160,6 +160,13 @@ struct StampProgram {
 }
 
 #[derive(Debug)]
+struct FillProgram {
+    program: glow::Program,
+    view: Uniform,
+    size: Uniform,
+}
+
+#[derive(Debug)]
 struct CompositeProgram {
     program: glow::Program,
     size: Uniform,
@@ -202,6 +209,10 @@ struct Dest {
 #[derive(Debug)]
 pub struct Renderer {
     stamp: StampProgram,
+    fill: FillProgram,
+    /// The triangles of a filled region, with the vertex array that reads them.
+    fill_vao: glow::VertexArray,
+    fill_buffer: glow::Buffer,
     composite: CompositeProgram,
     blit: BlitProgram,
     vao: glow::VertexArray,
@@ -220,7 +231,11 @@ pub struct Renderer {
 fn shader_header(gl: &glow::Context) -> Result<&'static str, GpuError> {
     let v = gl.version();
     if v.is_embedded && v.major >= 3 {
-        Ok("#version 300 es\nprecision highp float;\nprecision highp sampler2D;\n")
+        // Integers too: a uniform both stages declare must have the same precision in each, and ES gives the vertex
+        // stage `highp` and the fragment stage `mediump` for them unless told otherwise.
+        Ok(
+            "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n",
+        )
     } else if !v.is_embedded && (v.major > 3 || (v.major == 3 && v.minor >= 3)) {
         Ok("#version 330 core\n")
     } else {
@@ -436,9 +451,14 @@ impl Renderer {
     /// # Errors
     /// Fails when the OpenGL version is too old or a shader does not compile; callers should fall back to
     /// another renderer.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "creating the programs, buffers and uniforms is one straight list"
+    )]
     pub fn new(gl: &glow::Context) -> Result<Self, GpuError> {
         let header = shader_header(gl)?;
         let stamp = link(gl, header, shaders::STAMP_VERT, shaders::STAMP_FRAG)?;
+        let fill = link(gl, header, shaders::FILL_VERT, shaders::FILL_FRAG)?;
         let composite = link(
             gl,
             header,
@@ -480,6 +500,19 @@ impl Renderer {
             gl.bind_vertex_array(None);
             gl.bind_buffer(glow::ARRAY_BUFFER, None);
 
+            let fill_vao = gl
+                .create_vertex_array()
+                .map_err(|e| GpuError::Create("vertex array", e))?;
+            let fill_buffer = gl
+                .create_buffer()
+                .map_err(|e| GpuError::Create("buffer", e))?;
+            gl.bind_vertex_array(Some(fill_vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(fill_buffer));
+            gl.enable_vertex_attrib_array(0);
+            gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, 8, 0);
+            gl.bind_vertex_array(None);
+            gl.bind_buffer(glow::ARRAY_BUFFER, None);
+
             gl.use_program(Some(stamp));
             gl.uniform_1_i32(uniform(gl, stamp, "u_stamp_mask").as_ref(), 0);
             gl.use_program(Some(composite));
@@ -491,6 +524,13 @@ impl Renderer {
             gl.use_program(None);
 
             Ok(Self {
+                fill: FillProgram {
+                    program: fill,
+                    view: uniform(gl, fill, "u_view"),
+                    size: uniform(gl, fill, "u_size"),
+                },
+                fill_vao,
+                fill_buffer,
                 stamp: StampProgram {
                     program: stamp,
                     view: uniform(gl, stamp, "u_view"),
@@ -616,6 +656,9 @@ impl Renderer {
         }
         unsafe {
             gl.delete_program(self.stamp.program);
+            gl.delete_program(self.fill.program);
+            gl.delete_vertex_array(self.fill_vao);
+            gl.delete_buffer(self.fill_buffer);
             gl.delete_program(self.composite.program);
             gl.delete_program(self.blit.program);
             gl.delete_vertex_array(self.vao);
@@ -817,6 +860,10 @@ impl Renderer {
         unsafe {
             gl.clear_color(0.0, 0.0, 0.0, 0.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
+        }
+        // The inside of a region goes in first, and the stamps along its edge over it.
+        self.draw_fill(gl, batch, view, (width, height));
+        unsafe {
             gl.use_program(Some(self.stamp.program));
             gl.uniform_4_f32(
                 self.stamp.view.as_ref(),
@@ -860,6 +907,36 @@ impl Renderer {
             );
         }
         unsafe { gl.color_mask(true, true, true, true) };
+    }
+
+    /// Covers the inside of a region, in the red channel of the mask, with the triangles of `batch`.
+    fn draw_fill(&self, gl: &glow::Context, batch: &StrokeBatch, view: View, size: (f32, f32)) {
+        if batch.fill.is_empty() {
+            return;
+        }
+        unsafe {
+            gl.color_mask(true, false, false, false);
+            gl.blend_equation(glow::MAX);
+            gl.blend_func(glow::ONE, glow::ONE);
+            gl.use_program(Some(self.fill.program));
+            gl.uniform_4_f32(
+                self.fill.view.as_ref(),
+                view.zoom,
+                view.origin[0],
+                view.origin[1],
+                view.angle,
+            );
+            gl.uniform_2_f32(self.fill.size.as_ref(), size.0, size.1);
+            gl.bind_vertex_array(Some(self.fill_vao));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.fill_buffer));
+            gl.buffer_data_u8_slice(
+                glow::ARRAY_BUFFER,
+                bytemuck::cast_slice(&batch.fill),
+                glow::STREAM_DRAW,
+            );
+            gl.draw_arrays(glow::TRIANGLES, 0, (batch.fill.len() / 2) as i32);
+            gl.bind_vertex_array(Some(self.vao));
+        }
     }
 
     fn draw_stamps(&self, gl: &glow::Context, batch: &StrokeBatch, stamps: &Stamps) {

@@ -9,8 +9,11 @@ use eframe::egui::{
 use crate::app::InkApp;
 use crate::canvas;
 use crate::config::Pattern;
+use crate::density;
+use crate::density::bar_height;
 use crate::files::MESSAGE_SECONDS;
 use crate::paper;
+use crate::rail;
 use crate::settings::Section;
 use crate::theme;
 use crate::widgets;
@@ -22,18 +25,25 @@ enum Action {
     Open,
     Save,
     SaveAs,
+    Fit,
+    Turn,
     Settings(Section),
     Pattern(Pattern),
 }
 
 pub fn show(ctx: &Context, app: &mut InkApp) {
     if !app.ui.library_open {
-        zoom_chip(ctx, app);
-        turn_chip(ctx, app);
+        crate::shell::view_chips(ctx, app);
         turn_panel(ctx, app);
     }
-    note_menu(ctx, app);
+    crate::shell::menu(ctx, app);
     toast(ctx, app);
+}
+
+/// The zoom and the turn as chips in the corner: how the desktop shows them.
+pub(crate) fn chips(ctx: &Context, app: &mut InkApp) {
+    zoom_chip(ctx, app);
+    turn_chip(ctx, app);
 }
 
 /// How the zoom level reads in the chip: a whole percentage, `100%` at the size the drawing was made. The most
@@ -66,7 +76,7 @@ fn chip_place(ctx: &Context, beside: u8) -> egui::Pos2 {
     let corner = ctx.content_rect().right_bottom();
     egui::pos2(
         corner.x - CHIP_GAP - CHIP_WIDTH - f32::from(beside) * (CHIP_WIDTH + CHIP_SPACING),
-        corner.y - CHIP_GAP - ZOOM_CHIP_HEIGHT,
+        corner.y - CHIP_GAP - ZOOM_CHIP_HEIGHT - crate::rail::dock_lift(ctx),
     )
 }
 
@@ -170,7 +180,7 @@ fn turn_chip(ctx: &Context, app: &mut InkApp) {
 }
 
 /// The inside width of the turn panel.
-const TURN_PANEL_WIDTH: f32 = 196.0;
+const TURN_PANEL_WIDTH: f32 = 244.0;
 
 /// The panel over the turn chip: the angle of the paper as a number to drag or type, and a button that turns it
 /// upright. The paper turns about the middle of the window as the number changes.
@@ -184,6 +194,7 @@ fn turn_panel(ctx: &Context, app: &mut InkApp) {
     let before = app.view.degrees();
     let mut degrees = before;
     let mut upright = false;
+    let mut with_fingers = app.config.input.rotate_with_fingers;
     let area = Area::new(Id::unique("turn_panel"))
         .pivot(Align2::RIGHT_BOTTOM)
         .fixed_pos(egui::pos2(chip.right(), chip.top() - 8.0 + (1.0 - t) * 6.0))
@@ -215,6 +226,17 @@ fn turn_panel(ctx: &Context, app: &mut InkApp) {
                         .on_hover_text("Turn the paper upright")
                         .clicked();
                 });
+                // Turning with two fingers is off to begin with, so a hand moving the page while writing does not
+                // tilt it; it is switched on here, where turning is.
+                if widgets::toggle_row(
+                    ui,
+                    "Two fingers",
+                    Some("Twisting two fingers turns the paper"),
+                    &mut with_fingers,
+                ) {
+                    app.config.input.rotate_with_fingers = with_fingers;
+                    app.mark_config_changed();
+                }
             })
         });
     app.chrome.push(area.inner.response.rect);
@@ -235,16 +257,21 @@ fn turn_panel(ctx: &Context, app: &mut InkApp) {
 }
 
 /// The menu under the note chip: files, the paper, settings.
-fn note_menu(ctx: &Context, app: &mut InkApp) {
+pub(crate) fn note_menu(ctx: &Context, app: &mut InkApp) {
     let t = theme::pop(ctx, Id::unique("note_menu_pop"), app.ui.sheet_open);
     if t <= 0.001 {
         return;
     }
     let alpha = t * app.chrome_alpha;
     // The menu hangs 58 points from the top and keeps 16 from the bottom; its own margins take 20 more.
-    let room = (ctx.content_rect().height() - 58.0 - 16.0 - 20.0).max(120.0);
+    let room =
+        (ctx.content_rect().height() - bar_height(ctx) - 12.0 - 16.0 - 20.0 - rail::dock_lift(ctx))
+            .max(120.0);
     let area = Area::new(Id::unique("note_menu"))
-        .anchor(Align2::RIGHT_TOP, vec2(-16.0, 58.0 - (1.0 - t) * 10.0))
+        .anchor(
+            Align2::RIGHT_TOP,
+            vec2(-16.0, bar_height(ctx) + 12.0 - (1.0 - t) * 10.0),
+        )
         .order(Order::Foreground)
         .show(ctx, |ui| {
             ui.set_opacity(alpha);
@@ -268,8 +295,10 @@ fn note_menu(ctx: &Context, app: &mut InkApp) {
 
 fn menu_items(ui: &mut Ui, app: &InkApp) -> Option<Action> {
     let mut action = None;
+    // A device used by touch has no keys to name.
+    let hints = density::get(ui.ctx()).key_hints;
     let mut item = |ui: &mut Ui, label: &str, keys: &str, to: Action| {
-        if widgets::menu_row(ui, label, keys).clicked() {
+        if widgets::menu_row(ui, label, if hints { keys } else { "" }).clicked() {
             action = Some(to);
         }
     };
@@ -282,13 +311,20 @@ fn menu_items(ui: &mut Ui, app: &InkApp) -> Option<Action> {
     ui.add_space(6.0);
     widgets::divider(ui);
     ui.add_space(6.0);
+    item(ui, "Fit to screen", "", Action::Fit);
+    item(ui, "Turn the paper", "", Action::Turn);
+    ui.add_space(6.0);
+    widgets::divider(ui);
+    ui.add_space(6.0);
     item(ui, "Settings", "Ctrl+,", Action::Settings(Section::Brushes));
-    item(
-        ui,
-        "Keyboard shortcuts",
-        "",
-        Action::Settings(Section::Shortcuts),
-    );
+    if hints {
+        item(
+            ui,
+            "Keyboard shortcuts",
+            "",
+            Action::Settings(Section::Shortcuts),
+        );
+    }
     item(ui, "About", "", Action::Settings(Section::About));
     // The paper comes last: on a small window it is the part that scrolls, and nothing needed is below it.
     ui.add_space(6.0);
@@ -330,6 +366,8 @@ fn apply(ctx: &Context, app: &mut InkApp, action: &Action) {
         Action::Open => app.request_open(ctx),
         Action::Save => app.save(ctx),
         Action::SaveAs => app.save_as(ctx),
+        Action::Fit => app.fit_pending = true,
+        Action::Turn => app.ui.toggle_turn(),
         Action::Settings(section) => app.open_settings(section),
     }
     app.ui.sheet_open = false;
@@ -352,7 +390,8 @@ fn toast(ctx: &Context, app: &InkApp) {
         .show(ctx, |ui| {
             ui.set_opacity(fade);
             theme::floating(ui, [20.0; 4], Margin::symmetric(18, 10), |ui| {
-                ui.label(RichText::new(text).size(14.0));
+                // On one line however long: an area narrower than the text would wrap it.
+                ui.add(Label::new(RichText::new(text).size(14.0)).wrap_mode(TextWrapMode::Extend));
             });
         });
     ctx.request_repaint_after(std::time::Duration::from_millis(60));

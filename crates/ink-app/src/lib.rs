@@ -4,38 +4,58 @@
 //! result.
 
 mod app;
+mod back;
+mod bar_buttons;
 mod brushes;
 mod canvas;
 mod color_panel;
 mod commands;
 mod config;
+mod density;
 mod files;
 mod flyouts;
 mod gpu;
 mod guides;
 mod hud;
 mod icons;
+mod layer_ops;
 mod layers_panel;
 mod library;
+mod library_ops;
 mod library_page;
+mod object_ops;
+mod objects;
 mod paper;
 mod pen_art;
+mod platform;
 mod precision;
 mod rail;
 mod render;
 mod selection;
 mod selection_bar;
 mod settings;
+mod shape_art;
+mod shapes_drawer;
+mod shapes_panel;
+mod shell;
 mod shortcuts;
 mod shortcuts_panel;
 mod size_fields;
 mod state;
+pub mod system_files;
 mod tab_strip;
 mod tabs;
+mod text_art;
+mod text_editor;
+mod text_ops;
 mod textures;
 mod theme;
+mod thumbnail;
+mod toolbar;
 mod tools;
+mod touch_input;
 mod touch_taps;
+mod touch_ui;
 mod widgets;
 
 use std::path::PathBuf;
@@ -68,6 +88,17 @@ pub struct Options {
     pub show_menu: bool,
     /// Start with the precision panel open (used to check it in screenshots).
     pub show_precision: bool,
+    /// Start with the shapes menu open (used to check it in screenshots).
+    pub show_shapes: bool,
+    /// Start with the sheet where the tool bar is arranged open (used to check it in screenshots).
+    pub show_toolbar: bool,
+    /// Start with the place where words are typed open (used to check it in screenshots).
+    pub show_text: bool,
+    /// Keep the drawer of shapes open on the right (used to check it in screenshots).
+    pub show_drawer: bool,
+    /// Put a dozen of the shapes on the paper, some filled, once it is on the screen (used to check shapes in
+    /// screenshots).
+    pub demo_shapes: bool,
     /// Start with snapping on whatever the settings say (used to check it in screenshots).
     pub snap: bool,
     /// Put an artboard of this preset (`A4`, `HD`, ...) on the paper once it is on the screen (used to check
@@ -110,14 +141,27 @@ pub struct Options {
     /// Rest the pointer here from the second frame on, as if hovering (used to see what hovering does in
     /// screenshots).
     pub hover: Option<[f32; 2]>,
+    /// Lay the controls out for a finger, as on a tablet (used to check that layout in screenshots).
+    pub touch: bool,
 }
+
+pub use platform::{request_back, set_keyboard_pixels};
+pub use touch_input::{push_key, push_pointer, set_stylus_device};
 
 /// Opens the window and runs until it is closed.
 ///
 /// # Errors
 /// Returns the windowing or graphics error if the app could not start.
 pub fn run(options: Options) -> eframe::Result {
-    let least = [640.0, 480.0];
+    if options.touch {
+        platform::set_touch_first(true);
+    }
+    // A phone is narrower than the smallest window a computer is given, so a touch layout may be as small as one.
+    let least = if options.touch {
+        [320.0, 480.0]
+    } else {
+        [640.0, 480.0]
+    };
     let size = options
         .window
         .map_or([1280.0, 800.0], |[w, h]| [w.max(least[0]), h.max(least[1])]);
@@ -151,4 +195,32 @@ fn window_icon() -> Option<std::sync::Arc<eframe::egui::IconData>> {
         width,
         height,
     }))
+}
+
+/// Runs the app in the activity Android started, until it is closed. The settings and drawings are kept in the
+/// folders Android gives the app: the drawings where a person can reach them from a computer when there is such a
+/// place, the settings inside the app.
+///
+/// # Errors
+/// Returns the windowing or graphics error if the app could not start.
+#[cfg(target_os = "android")]
+pub fn run_android(app: android_activity::AndroidApp) -> eframe::Result {
+    platform::remember(app.clone());
+    let inside = app.internal_data_path();
+    let outside = app.external_data_path();
+    if let Some(inside) = inside.clone().or_else(|| outside.clone()) {
+        config::set_app_dirs(config::AppDirs {
+            config: inside.clone(),
+            drawings: outside.unwrap_or(inside).join("drawings"),
+        });
+    }
+    let native = eframe::NativeOptions {
+        android_app: Some(app),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "inkwell",
+        native,
+        Box::new(move |cc| Ok(Box::new(InkApp::new(cc, Options::default())))),
+    )
 }

@@ -54,6 +54,10 @@ pub struct CanvasEnv<'a> {
     pub artboard: Option<Artboard>,
     /// How long the pen has been still, for shape recognition.
     pub hold: &'a mut Hold,
+    /// Strokes that are not drawn: the letters of words that are being typed again.
+    pub hidden: &'a HashSet<Uuid>,
+    /// Set when a double touch on words or a figure picked them to be written in or changed.
+    pub edit_words: &'a mut bool,
 }
 
 /// How far, in points, the pen may move and still be held still.
@@ -252,7 +256,8 @@ pub fn show(ui: &mut Ui, env: &mut CanvasEnv<'_>) -> Rect {
     watch_hold(ui.ctx(), env);
     show_cursor(&painter, &response, env);
 
-    let (live, hide) = live_strokes(env);
+    let (live, mut hide) = live_strokes(env);
+    hide.extend(env.hidden.iter().copied());
     // Leaving strokes out of the committed picture is a different picture, so it has its own key; the key then
     // stays the same for as long as they are held, and only the live strokes are redrawn.
     let hidden_key = hidden_key(&hide);
@@ -739,7 +744,10 @@ fn handle_input(ui: &Ui, rect: Rect, response: &egui::Response, env: &mut Canvas
     if let Some(touch) = multi_touch {
         *env.builder = None;
         env.view.pan(touch.translation_delta);
-        if env.config.input.rotation_enabled && touch.rotation_delta.abs() > 1e-5 {
+        if env.config.input.rotation_enabled
+            && env.config.input.rotate_with_fingers
+            && touch.rotation_delta.abs() > 1e-5
+        {
             let at = latest.unwrap_or_else(|| rect.center());
             env.view.rotate_at(at, -touch.rotation_delta);
             turned_at = Some(at);
@@ -783,6 +791,13 @@ fn handle_input(ui: &Ui, rect: Rect, response: &egui::Response, env: &mut Canvas
     if multi_touch.is_some() || env.pan_held {
         return;
     }
+    // A double touch on words or on a figure opens them for writing, whichever tool is in use (drawing and selecting, that
+    // is: the eraser takes what it touches, and the hand moves the paper).
+    if matches!(env.tool.mode, Mode::Draw | Mode::Select)
+        && double_touch(&ctx, rect, canvas_layer, &events, now, env)
+    {
+        return;
+    }
     match env.tool.mode {
         Mode::Pan => return,
         Mode::Erase => {
@@ -798,6 +813,74 @@ fn handle_input(ui: &Ui, rect: Rect, response: &egui::Response, env: &mut Canvas
 
     let times = event_times(&events, now, frame_dt);
     draw_events(&ctx, rect, canvas_layer, env, events.into_iter().zip(times));
+}
+
+/// How soon after one touch the next must come, in seconds, and how near it must be, in points, for the two to be a
+/// double touch.
+const DOUBLE_TOUCH: (f64, f32) = (0.45, 32.0);
+/// The most a stroke can span, in points, and still be the dot a touch draws.
+const DOT: f32 = 8.0;
+/// How far from a touch, in points, words or a figure still count as touched.
+const NEAR: f32 = 10.0;
+
+/// Notices a double touch of the paper. When it is on words or on a figure they are picked (with what is tied to them) and
+/// `env.edit_words` is set, the dot the first touch may have drawn is taken back, and `true` is returned: the touch is
+/// not for the tool. Otherwise the touch is remembered for the next one.
+fn double_touch(
+    ctx: &egui::Context,
+    rect: Rect,
+    canvas_layer: egui::LayerId,
+    events: &[Event],
+    now: f64,
+    env: &mut CanvasEnv<'_>,
+) -> bool {
+    let id = egui::Id::unique("last_touch");
+    for event in events {
+        let Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed: true,
+            ..
+        } = event
+        else {
+            continue;
+        };
+        if !rect.contains(*pos) || ctx.layer_id_at(*pos) != Some(canvas_layer) {
+            continue;
+        }
+        let before = ctx.data(|d| d.get_temp::<(f64, Pos2, usize)>(id));
+        if let Some((then, at, mark)) = before
+            && now - then <= DOUBLE_TOUCH.0
+            && at.distance(*pos) <= DOUBLE_TOUCH.1
+        {
+            // The first touch may have drawn a dot, which is not what was meant.
+            let dot = env
+                .editor
+                .document()
+                .layers
+                .get(env.active_layer)
+                .and_then(|l| l.strokes.last())
+                .filter(|s| {
+                    env.editor.history_mark() == mark + 1 && s.length() * env.view.zoom < DOT
+                })
+                .map(|s| s.id);
+            let radius = NEAR / env.view.zoom;
+            if let Some(ids) =
+                crate::text_ops::words_hit(env.editor, env.view.to_canvas(*pos), radius, dot)
+            {
+                if dot.is_some() {
+                    env.editor.undo();
+                }
+                *env.selection = ids;
+                *env.edit_words = true;
+                *env.builder = None;
+                ctx.data_mut(|d| d.remove_temp::<(f64, Pos2, usize)>(id));
+                return true;
+            }
+        }
+        ctx.data_mut(|d| d.insert_temp(id, (now, *pos, env.editor.history_mark())));
+    }
+    false
 }
 
 /// Once the zoom has stopped changing for a moment, settles it on a round level if it is close to one. (Doing it

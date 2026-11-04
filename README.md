@@ -6,23 +6,31 @@ A cross-platform sketching app written in Rust. Android tablets with a stylus ar
 desktop app comes first. The goal is a smooth, high-quality inking engine that can read and write a documented
 document format.
 
-**Status:** the Windows app works (pens, layers, library with folders, editing tools, precision tools). Android
-and the web build are still to come. This is an independent implementation. It is not affiliated with any other
+**Status:** the Windows app and the Android app work (pens, layers, library with folders, editing tools, precision
+tools, shapes with fill, text, a tool bar you arrange yourself, and an interface made for a finger and a stylus on
+Android). The web build is still to come. This is an independent implementation. It is not affiliated with any other
 drawing app, and it contains no third-party assets. See `docs/` for the design.
 
 ## Download
 
-Windows 10 and 11, 64-bit, from the [Releases](https://github.com/Sriram-Karthick-k/ink-well/releases) page, or
-directly, always the newest:
+Windows 10 and 11 (64-bit) and Android 8 or newer (64-bit ARM) from the
+[Releases](https://github.com/Sriram-Karthick-k/ink-well/releases) page, or directly, always the newest:
 
 - [inkwell-windows-x64.zip](https://github.com/Sriram-Karthick-k/ink-well/releases/latest/download/inkwell-windows-x64.zip)
   (the app with a short readme)
 - [inkwell-windows-x64.exe](https://github.com/Sriram-Karthick-k/ink-well/releases/latest/download/inkwell-windows-x64.exe)
   (just the file)
 
-Run the exe; it is one file with nothing to install. The download is not code signed, so Windows SmartScreen may ask you to confirm once ("More info", "Run anyway");
-`SHA256SUMS.txt` has the checksums. Releases are built by `.github/workflows/release.yml` when a tag such as
-`v0.1.0` or `RELEASE_1.0_BETA` is pushed; run that workflow by hand to get a build without publishing it.
+- [inkwell-android-arm64.apk](https://github.com/Sriram-Karthick-k/ink-well/releases/latest/download/inkwell-android-arm64.apk)
+  (the Android app)
+
+Run the exe; it is one file with nothing to install. The download is not code signed, so Windows SmartScreen may ask you to confirm once ("More info", "Run anyway").
+To install the APK, open it on the device and allow installs from the app you opened it with when Android asks;
+it is not from a store. `SHA256SUMS.txt` has the checksums of every file. Releases are built by
+`.github/workflows/release.yml` when a tag such as `v0.1.0` or `RELEASE_1.1_BETA` is pushed; the notes of a release are
+the file `release-notes/<tag>.md` when there is one. Run that workflow by hand to get a build without publishing it.
+
+To build the APK yourself see `android/build_apk.py`, which also says how to sign it with a key of your own.
 
 ## Layout
 
@@ -37,6 +45,9 @@ Run the exe; it is one file with nothing to install. The download is not code si
 | `docs/` | `ARCHITECTURE.md` (design), `FORMAT.md` (the `.ink` file format), and what the precision tools, editing tools and settings do. |
 | `assets/logo/` | The logo (SVG, PNG, ICO) and `make_logo.py`, which draws all of them. |
 | `packaging/` | What goes in the Windows download besides the exe. |
+| `android/` | The Android app's activity, manifest, icons and `build_apk.py`, which builds and signs the APK. |
+| `crates/ink-android` | The Android entry point: hands touch, keys and files from the system to `ink-app`. |
+| `release-notes/` | The notes of each release, named by its tag. |
 
 ## Build
 
@@ -47,7 +58,7 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build -p ink-wasm --target wasm32-unknown-unknown --release   # web
-cargo check --workspace --exclude ink-wasm --exclude ink-app --target aarch64-linux-android   # Android (logic crates)
+python android/build_apk.py                                          # Android APK (see the script for what it needs)
 ```
 
 ## Run

@@ -15,7 +15,9 @@ use ink_core::snap::{self, Grid, Lattice, Targets};
 
 use crate::app::InkApp;
 use crate::config::{CanvasConfig, Config, Pattern, PrecisionConfig};
+use crate::density::bar_height;
 use crate::paper;
+use crate::rail;
 use crate::shortcuts::Command;
 use crate::theme;
 use crate::widgets;
@@ -249,7 +251,7 @@ pub fn recognition_controls(ui: &mut Ui, precision: &mut PrecisionConfig) {
 
 /// A button for each kind of shape guide: lit when the drawing has one, and pressing it puts one on the paper or
 /// takes it away.
-fn guide_buttons(ui: &mut Ui, app: &mut InkApp) {
+pub(crate) fn guide_buttons(ui: &mut Ui, app: &mut InkApp) {
     widgets::heading(ui, "SHAPE GUIDES");
     widgets::caption(
         ui,
@@ -296,17 +298,23 @@ pub fn show(ctx: &Context, app: &mut InkApp) {
         return;
     }
     let alpha = t * app.chrome_alpha;
-    let room = (ctx.content_rect().height() - 58.0 - 16.0 - 28.0).max(120.0);
+    let room =
+        (ctx.content_rect().height() - bar_height(ctx) - 12.0 - 16.0 - 28.0 - rail::dock_lift(ctx))
+            .max(120.0);
     let area = Area::new(Id::unique("precision_panel"))
-        .anchor(Align2::RIGHT_TOP, vec2(-16.0, 58.0 - (1.0 - t) * 10.0))
+        .anchor(
+            Align2::RIGHT_TOP,
+            vec2(-16.0, bar_height(ctx) + 12.0 - (1.0 - t) * 10.0),
+        )
         .order(Order::Foreground)
         .show(ctx, |ui| {
             ui.set_opacity(alpha);
             // See `flyouts::flyout`: the area would otherwise clip the scroll area to the size it had last time.
             ui.set_max_height(ctx.content_rect().height());
             theme::floating(ui, [24.0; 4], Margin::same(14), |ui| {
-                // Wide enough for a title and a hint on the left of a slider and its value, as in the settings.
-                ui.set_width(430.0);
+                // Wide enough for a title and a hint on the left of a slider and its value, as in the settings, but
+                // never wider than the screen leaves room for (a phone).
+                ui.set_width((ctx.content_rect().width() - 2.0 * 16.0 - 28.0).clamp(240.0, 430.0));
                 ScrollArea::vertical()
                     .max_height(room)
                     .auto_shrink([true, true])

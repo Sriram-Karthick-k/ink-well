@@ -11,11 +11,11 @@ use eframe::egui::{
 use ink_core::units::Measurement;
 
 use crate::app::InkApp;
+use crate::density::bar_height;
 use crate::icons::Icon;
 use crate::shortcuts::Command;
 use crate::size_fields::{self, Field, Session};
 use crate::state::Mode;
-use crate::tab_strip::BAR_HEIGHT;
 use crate::theme;
 use crate::tools;
 use crate::widgets;
@@ -331,7 +331,7 @@ pub fn show(ctx: &Context, app: &mut InkApp) {
     let narrow = ctx.content_rect().width() < WIDE;
     let mut run = None;
     let area = Area::new(Id::unique("selection_bar"))
-        .anchor(Align2::CENTER_TOP, vec2(0.0, BAR_HEIGHT + GAP))
+        .anchor(Align2::CENTER_TOP, vec2(0.0, bar_height(ctx) + GAP))
         .order(Order::Foreground)
         .show(ctx, |ui| {
             ui.set_opacity(alpha);
@@ -398,7 +398,7 @@ fn show_locked(ctx: &Context, app: &mut InkApp) {
     let alpha = app.chrome_alpha;
     let mut pressed = false;
     let area = Area::new(Id::unique("locked_bar"))
-        .anchor(Align2::CENTER_TOP, vec2(0.0, BAR_HEIGHT + GAP))
+        .anchor(Align2::CENTER_TOP, vec2(0.0, bar_height(ctx) + GAP))
         .order(Order::Foreground)
         .show(ctx, |ui| {
             ui.set_opacity(alpha);

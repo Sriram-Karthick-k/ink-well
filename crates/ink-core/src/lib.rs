@@ -15,6 +15,7 @@ pub mod ids;
 pub mod marks;
 pub mod nudge;
 pub mod recognize;
+pub mod shapes;
 pub mod slice;
 pub mod smoothing;
 pub mod snap;

@@ -130,7 +130,9 @@ impl InkApp {
             C::OpenPrecision => self.ui.toggle_precision(),
             C::HidePanels => self.ui.panels_hidden = !self.ui.panels_hidden,
             C::OpenBrushes => self.ui.toggle_case(),
-            C::OpenLayers => self.ui.layers_open = !self.ui.layers_open,
+            C::OpenShapes => self.ui.toggle_shapes(),
+            C::WriteText => self.toggle_text(ctx),
+            C::OpenLayers => self.ui.toggle_layers(),
             C::OpenLibrary => self.toggle_library(ctx),
             C::OpenSettings => self.toggle_settings(),
             C::SelectAll
@@ -305,7 +307,11 @@ impl InkApp {
             self.taps_revision = revision;
             self.no_taps_until = now + 0.6;
         }
-        let Some(fingers) = self.taps.update(&events, now) else {
+        let fingers = self.taps.update(&events, now);
+        if let Some(at) = self.taps.take_double() {
+            self.double_tap_at(at);
+        }
+        let Some(fingers) = fingers else {
             return;
         };
         if now < self.no_taps_until || self.ui.library_open || self.ui.settings.is_some() {
@@ -315,6 +321,30 @@ impl InkApp {
         self.run_tap_action(action);
         // What the tap itself changed (an undo, say) is not a stroke, so it does not hold the next tap back.
         self.taps_revision = self.editor.revision();
+    }
+
+    /// A finger tapped twice at `at` on the screen: if that is on words or on a figure of the drawing they are opened for
+    /// writing, as a double click does. Fingers that draw have their double touch noticed with the pen's, on the paper.
+    fn double_tap_at(&mut self, at: egui::Pos2) {
+        let on_paper = self.canvas_rect.is_some_and(|r| r.contains(at))
+            && !self.chrome.iter().any(|area| area.contains(at));
+        let free = !self.ui.library_open
+            && self.ui.settings.is_none()
+            && !self.ui.any_popover()
+            && !self.ui.layers_open
+            && self.ui.text.is_none()
+            && matches!(self.tool.mode, Mode::Draw | Mode::Select);
+        if !on_paper || !free || self.builder.is_some() {
+            return;
+        }
+        let radius = 10.0 / self.view.zoom;
+        if let Some(ids) =
+            crate::text_ops::words_hit(&self.editor, self.view.to_canvas(at), radius, None)
+        {
+            self.selection = ids;
+            self.set_mode(Mode::Select);
+            self.begin_text();
+        }
     }
 
     pub(crate) fn run_tap_action(&mut self, action: TapAction) {
@@ -435,6 +465,31 @@ impl InkApp {
             mode
         };
         self.set_mode(next);
+    }
+
+    /// A pen was tapped in a panel of tools: the one in use opens its size and opacity, any other becomes the one in
+    /// use.
+    pub(crate) fn choose_pen(&mut self, pen: ink_core::Pen) {
+        if self.tool.mode == Mode::Draw && self.tool.pen == pen {
+            self.ui.toggle_dial();
+        } else {
+            self.select_pen(pen);
+            self.set_mode(Mode::Draw);
+            self.ui.close_popovers();
+        }
+    }
+
+    /// A tool was tapped in a panel of tools. The hand switches on and off; any other tool opens its options when it
+    /// is the one in use, and becomes the one in use when it is not.
+    pub(crate) fn choose_tool(&mut self, mode: Mode) {
+        if mode == Mode::Pan {
+            self.toggle_mode(Mode::Pan);
+        } else if self.tool.mode == mode {
+            self.ui.toggle_dial();
+        } else {
+            self.set_mode(mode);
+            self.ui.close_popovers();
+        }
     }
 
     fn pick_rail_pen(&mut self, slot: usize) {

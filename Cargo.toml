@@ -27,6 +27,13 @@ missing_panics_doc = "allow"
 similar_names = "allow"
 many_single_char_names = "allow"
 
+# A quicker build of the Android app for trying a change on a device: optimized, but without link-time optimization.
+[profile.fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+
 [profile.release]
 opt-level = 3
 lto = "thin"

@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 ink-core = { version = "0.1.0", path = "../ink-core" }
+lyon_tessellation = "1.0.23"
 serde = { version = "1.0.229", features = ["derive"] }
 
 [dev-dependencies]

@@ -7,6 +7,7 @@ One set of shapes (in a 512 by 512 box) makes every file, so they always agree:
     inkwell.png       512 by 512
     inkwell-256.png   256 by 256, the window icon the app embeds
     inkwell.ico       16, 32, 48 and 256, the icon of the Windows executable
+    ../../android/res/mipmap-*/ic_launcher.png   the launcher icon of the Android app
 
 It needs only the standard library (there is a small scanline rasterizer below), so
 `python assets/logo/make_logo.py` works anywhere. Run it from the repository root.
@@ -339,7 +340,9 @@ def svg():
 
 def main():
     renders = {}
-    for size in (16, 32, 48, 256, 512):
+    # The launcher icon of the Android app, one size for each screen density.
+    launcher = {"mdpi": 48, "hdpi": 72, "xhdpi": 96, "xxhdpi": 144, "xxxhdpi": 192}
+    for size in sorted({16, 32, 48, 256, 512, *launcher.values()}):
         renders[size] = to_rgba(render(size))
         print(f"drew {size} x {size}")
     write = lambda name, data, mode="wb": open(os.path.join(HERE, name), mode).write(data)
@@ -347,6 +350,11 @@ def main():
     write("inkwell.png", png(512, renders[512]))
     write("inkwell-256.png", png(256, renders[256]))
     write("inkwell.ico", ico([(s, renders[s]) for s in (16, 32, 48, 256)]))
+    for density, size in launcher.items():
+        folder = os.path.join(HERE, "..", "..", "android", "res", f"mipmap-{density}")
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, "ic_launcher.png"), "wb") as out:
+            out.write(png(size, renders[size]))
     print("wrote inkwell.svg, inkwell.png, inkwell-256.png, inkwell.ico in", HERE)
 
 

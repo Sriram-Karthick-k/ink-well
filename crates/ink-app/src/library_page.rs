@@ -14,9 +14,10 @@ use eframe::egui::{
 };
 
 use crate::app::InkApp;
-use crate::library::{self, FolderCard, ItemMenu, MovePicker, Note, Preview, Sort};
-use crate::tab_strip;
+use crate::library::{self, FolderCard, ItemMenu, MovePicker, Note, Sort};
+use crate::library_ops::name_of;
 use crate::theme;
+use crate::thumbnail::{paint_folder_glyph, paint_preview};
 use crate::widgets;
 
 const CARD_WIDTH: f32 = 236.0;
@@ -44,6 +45,13 @@ enum Action {
     Rename(PathBuf, String),
     Duplicate(PathBuf),
     Delete(PathBuf),
+    #[cfg_attr(
+        target_os = "android",
+        allow(
+            dead_code,
+            reason = "there is no file manager to show a drawing in on Android"
+        )
+    )]
     Reveal(PathBuf),
     OpenMovePicker(MovePicker),
     MoveInto(PathBuf, PathBuf),
@@ -67,7 +75,7 @@ pub fn show(ctx: &Context, app: &mut InkApp) {
     demo_state(ctx, app);
     let whole = ctx.content_rect();
     let screen = Rect::from_min_max(
-        pos2(whole.left(), whole.top() + tab_strip::BAR_HEIGHT),
+        pos2(whole.left(), whole.top() + crate::density::bar_height(ctx)),
         whole.max,
     );
     let columns =
@@ -182,18 +190,6 @@ fn paint_backdrop(ui: &Ui, rect: Rect) {
     mesh.add_triangle(0, 1, 2);
     mesh.add_triangle(0, 2, 3);
     ui.painter().add(Shape::mesh(mesh));
-}
-
-/// The name of a drawing (without its extension) or folder.
-fn name_of(path: &Path) -> String {
-    let name = if path.is_dir() {
-        path.file_name()
-    } else {
-        path.file_stem()
-    };
-    name.and_then(|n| n.to_str())
-        .unwrap_or("Untitled")
-        .to_owned()
 }
 
 fn header(ui: &mut Ui, app: &mut InkApp, page: &mut Page) {
@@ -405,24 +401,6 @@ fn pill(ui: &mut Ui, label: &str, primary: bool, glyph: Glyph) -> Response {
         ink,
     );
     response
-}
-
-/// A small folder: a body with a tab.
-fn paint_folder_glyph(painter: &Painter, center: Pos2, size: f32, color: Color32) {
-    let body = Rect::from_center_size(center + vec2(0.0, 1.5), vec2(size, size * 0.72));
-    let tab = Rect::from_min_size(body.min - vec2(0.0, 3.0), vec2(size * 0.42, 4.0));
-    let stroke = Stroke::new(1.6, color);
-    painter.rect_stroke(body, CornerRadius::same(2), stroke, StrokeKind::Inside);
-    painter.rect_filled(
-        tab,
-        CornerRadius {
-            nw: 2,
-            ne: 2,
-            sw: 0,
-            se: 0,
-        },
-        color,
-    );
 }
 
 /// A caption above a group of cards.
@@ -853,41 +831,6 @@ fn folder_card(ui: &mut Ui, app: &InkApp, page: &mut Page, folder: &FolderCard) 
     }
 }
 
-/// Draws a drawing's strokes, scaled to fit `rect` and centered in it.
-fn paint_preview(painter: &Painter, rect: Rect, preview: &Preview) {
-    let painter = painter.with_clip_rect(rect);
-    let [x0, y0, x1, y1] = preview.bounds;
-    let inner = rect.shrink(rect.height().min(rect.width()) * 0.1);
-    let scale = (inner.width() / (x1 - x0).max(1.0))
-        .min(inner.height() / (y1 - y0).max(1.0))
-        .min(3.0);
-    let (cx, cy) = (f32::midpoint(x0, x1), f32::midpoint(y0, y1));
-    let map = |p: [f32; 2]| {
-        pos2(
-            rect.center().x + (p[0] - cx) * scale,
-            rect.center().y - (p[1] - cy) * scale,
-        )
-    };
-    let thickest = if rect.height() > 100.0 { 9.0 } else { 4.0 };
-    for stroke in &preview.strokes {
-        let [r, g, b, a] = stroke.color;
-        let color = Color32::from_rgba_unmultiplied(r, g, b, a);
-        let width = (stroke.width * scale).clamp(1.0, thickest);
-        match stroke.points.as_slice() {
-            [] => {}
-            [only] => {
-                painter.circle_filled(map(*only), width / 2.0, color);
-            }
-            points => {
-                painter.add(Shape::line(
-                    points.iter().map(|p| map(*p)).collect(),
-                    Stroke::new(width, color),
-                ));
-            }
-        }
-    }
-}
-
 /// The menu of a drawing or folder.
 fn item_menu(ctx: &Context, app: &mut InkApp, page: &mut Page) {
     let Some(menu) = app.library.menu.clone() else {
@@ -1159,7 +1102,7 @@ fn dragging(ctx: &Context, app: &mut InkApp, page: &mut Page) {
 fn apply(ctx: &Context, app: &mut InkApp, action: Action) {
     match action {
         Action::New => app.new_tab(ctx),
-        Action::NewFolder => new_folder(ctx, app),
+        Action::NewFolder => app.library_new_folder(ctx),
         Action::Import => app.import_notes(ctx),
         Action::GoTo(folder) => {
             app.library.menu = None;
@@ -1176,22 +1119,10 @@ fn apply(ctx: &Context, app: &mut InkApp, action: Action) {
             app.library.move_picker = None;
             app.library.menu = (!same).then_some(menu);
         }
-        Action::AskRename(path) => {
-            let name = name_of(&path);
-            app.library.menu = None;
-            app.library.renaming = Some((path, name));
-        }
-        Action::Rename(path, name) => rename(ctx, app, &path, name),
-        Action::Duplicate(path) => {
-            app.library.menu = None;
-            app.flush_autosave(ctx);
-            match library::duplicate_note(&path) {
-                Ok(_) => app.notify(ctx, "Duplicated"),
-                Err(e) => app.notify(ctx, e),
-            }
-            app.refresh_library(ctx);
-        }
-        Action::Delete(path) => delete(ctx, app, &path),
+        Action::AskRename(path) => app.library_ask_rename(path),
+        Action::Rename(path, name) => app.library_rename(ctx, &path, name),
+        Action::Duplicate(path) => app.library_duplicate(ctx, &path),
+        Action::Delete(path) => app.library_delete(ctx, &path),
         Action::Reveal(path) => {
             app.library.menu = None;
             reveal(&path);
@@ -1200,87 +1131,13 @@ fn apply(ctx: &Context, app: &mut InkApp, action: Action) {
             app.library.menu = None;
             app.library.move_picker = Some(picker);
         }
-        Action::MoveInto(path, target) => move_into(ctx, app, &path, &target),
+        Action::MoveInto(path, target) => app.library_move_into(ctx, &path, &target),
         Action::BeginDrag(path) => {
             app.library.menu = None;
             app.library.drag = Some(path);
         }
-        Action::Undo => {
-            if let Some(deleted) = app.library.deleted.take() {
-                match library::restore_item(&deleted) {
-                    Ok(_) => app.notify(
-                        ctx,
-                        format!("Brought back \u{201c}{}\u{201d}", deleted.name),
-                    ),
-                    Err(e) => app.notify(ctx, e),
-                }
-                app.refresh_library(ctx);
-            }
-        }
+        Action::Undo => app.library_undo_delete(ctx),
     }
-}
-
-/// Makes a folder in the one shown and asks for its name right away.
-fn new_folder(ctx: &Context, app: &mut InkApp) {
-    match library::create_folder(&app.library.current, "") {
-        Ok(path) => {
-            let name = name_of(&path);
-            app.refresh_library(ctx);
-            app.library.renaming = Some((path, name));
-        }
-        Err(e) => app.notify(ctx, e),
-    }
-}
-
-fn rename(ctx: &Context, app: &mut InkApp, path: &Path, name: String) {
-    app.flush_autosave(ctx);
-    match library::rename_item(path, &name) {
-        Ok(new_path) => {
-            app.follow_move(path, &new_path);
-            app.notify(ctx, "Renamed");
-            app.refresh_library(ctx);
-        }
-        Err(e) => {
-            // Keep the dialog open with what was typed, so it can be fixed.
-            app.library.renaming = Some((path.to_owned(), name));
-            app.notify(ctx, e);
-        }
-    }
-}
-
-fn move_into(ctx: &Context, app: &mut InkApp, path: &Path, target: &Path) {
-    app.library.move_picker = None;
-    app.flush_autosave(ctx);
-    match library::move_item(path, target) {
-        Ok(new_path) => {
-            if new_path != path {
-                app.follow_move(path, &new_path);
-                let place = if target == app.library.root {
-                    "Library".to_owned()
-                } else {
-                    name_of(target)
-                };
-                app.notify(ctx, format!("Moved to \u{201c}{place}\u{201d}"));
-            }
-            app.refresh_library(ctx);
-        }
-        Err(e) => app.notify(ctx, e),
-    }
-}
-
-fn delete(ctx: &Context, app: &mut InkApp, path: &Path) {
-    app.library.menu = None;
-    let now = ctx.input(|i| i.time);
-    let root = app.library.root.clone();
-    match library::delete_item(path, &root, now) {
-        Ok(deleted) => {
-            // Drawings that were open in tabs go with their files.
-            app.close_tabs_under(ctx, path);
-            app.library.deleted = Some(deleted);
-        }
-        Err(e) => app.notify(ctx, e),
-    }
-    app.refresh_library(ctx);
 }
 
 /// Shows the file in the system's file manager.

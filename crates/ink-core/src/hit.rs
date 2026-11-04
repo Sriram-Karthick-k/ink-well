@@ -1,6 +1,6 @@
 //! Which strokes a point touches, for erasing and selecting.
 
-use crate::document::Stroke;
+use crate::document::{Pen, Stroke};
 use crate::geometry::Point;
 
 /// The shortest distance from `p` to the segment `a`..`b`.
@@ -14,23 +14,31 @@ fn segment_distance(p: Point, a: Point, b: Point) -> f32 {
     p.distance(Point::new(a.x + abx * t, a.y + aby * t))
 }
 
-/// `true` when a disc of `radius` around `p` touches `stroke`, counting half the stroke's own width.
+/// `true` when a disc of `radius` around `p` touches `stroke`, counting half the stroke's own width. A region (a
+/// stroke of the filling pen) is touched anywhere inside it as well as along its edge.
 #[must_use]
 pub fn touches(stroke: &Stroke, p: Point, radius: f32) -> bool {
     let reach = radius + stroke.width.unwrap_or(1.0) / 2.0;
-    let mut points = stroke.points();
-    let Some(mut previous) = points.next() else {
+    let points: Vec<Point> = stroke.points().collect();
+    let Some((&first, rest)) = points.split_first() else {
         return false;
     };
-    let mut alone = true;
-    for next in points {
-        alone = false;
+    if rest.is_empty() {
+        return first.distance(p) <= reach;
+    }
+    let region = stroke.pen == Pen::Fill && points.len() >= 3;
+    if region && point_in_polygon(p, &points) {
+        return true;
+    }
+    let mut previous = first;
+    for &next in rest {
         if segment_distance(p, previous, next) <= reach {
             return true;
         }
         previous = next;
     }
-    alone && previous.distance(p) <= reach
+    // A region is closed by a line from its last point back to its first.
+    region && segment_distance(p, previous, first) <= reach
 }
 
 /// `true` if `p` is inside the closed `polygon` (the last point joins the first).
@@ -142,6 +150,63 @@ mod tests {
     #[test]
     fn beyond_the_ends_does_not_touch() {
         assert!(!touches(&line(2.0), Point::new(130.0, 0.0), 5.0));
+    }
+
+    fn region(points: &[(f32, f32)]) -> Stroke {
+        let mut b = StrokeBuilder::new(Pen::Fill, None, Color::BLACK, 1.0, 0.0);
+        b.replace_with(points.iter().map(|&(x, y)| Point::new(x, y)).collect());
+        b.finish()
+    }
+
+    #[test]
+    fn a_region_is_touched_anywhere_inside_it_and_not_outside() {
+        let square = region(&[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)]);
+        assert!(touches(&square, Point::new(50.0, 50.0), 1.0), "the middle");
+        assert!(!touches(&square, Point::new(150.0, 50.0), 1.0), "outside");
+        assert!(
+            touches(&square, Point::new(50.0, -0.5), 1.0),
+            "its edge, a touch outside it"
+        );
+    }
+
+    #[test]
+    fn the_edge_a_region_is_closed_by_is_part_of_it() {
+        let square = region(&[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)]);
+        assert!(touches(&square, Point::new(-0.5, 50.0), 1.0));
+    }
+
+    #[test]
+    fn a_hole_in_a_region_is_not_touched() {
+        let ring = region(&[
+            (0.0, 0.0),
+            (100.0, 0.0),
+            (100.0, 100.0),
+            (0.0, 100.0),
+            (0.0, 0.0),
+            (30.0, 30.0),
+            (30.0, 70.0),
+            (70.0, 70.0),
+            (70.0, 30.0),
+            (30.0, 30.0),
+        ]);
+        assert!(touches(&ring, Point::new(10.0, 50.0), 1.0), "in the ring");
+        assert!(
+            !touches(&ring, Point::new(50.0, 50.0), 1.0),
+            "in the hole, away from the edges"
+        );
+    }
+
+    #[test]
+    fn a_stroke_that_is_not_a_region_is_not_touched_inside_its_outline() {
+        let mut b = StrokeBuilder::new(Pen::Pen, Some(2.0), Color::BLACK, 1.0, 0.0);
+        b.replace_with(vec![
+            Point::new(0.0, 0.0),
+            Point::new(100.0, 0.0),
+            Point::new(100.0, 100.0),
+            Point::new(0.0, 100.0),
+            Point::new(0.0, 0.0),
+        ]);
+        assert!(!touches(&b.finish(), Point::new(50.0, 50.0), 1.0));
     }
 
     #[test]

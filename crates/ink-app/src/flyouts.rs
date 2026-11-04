@@ -65,17 +65,32 @@ pub fn flyout<R>(
         (screen.height() - EDGE - half).max(EDGE + half),
     );
     let slide = (1.0 - t) * 14.0;
-    let (pivot, x) = if lefty {
+    // With the rail a dock along the bottom the flyout opens above it, in the middle; beside the rail otherwise.
+    let dock_top = app.ui.anchors.dock_top;
+    let docked = dock_top > 0.0;
+    let (pivot, x, y) = if docked {
+        (
+            Align2::CENTER_BOTTOM,
+            screen.center().x,
+            dock_top - EDGE * 0.6 + slide,
+        )
+    } else if lefty {
         (
             Align2::RIGHT_CENTER,
             screen.right() - rail::flyout_offset() + slide,
+            y,
         )
     } else {
-        (Align2::LEFT_CENTER, rail::flyout_offset() - slide)
+        (Align2::LEFT_CENTER, rail::flyout_offset() - slide, y)
     };
     let alpha = if settled { t * app.chrome_alpha } else { 0.0 };
     // However small the window, the flyout is never taller than it: what does not fit scrolls.
-    let most = (screen.height() - 2.0 * EDGE - 2.0 * FLYOUT_MARGIN).max(120.0);
+    let room = if docked {
+        dock_top - screen.top()
+    } else {
+        screen.height()
+    };
+    let most = (room - 2.0 * EDGE - 2.0 * FLYOUT_MARGIN).max(120.0);
     let area = Area::new(Id::unique(("flyout", name)))
         .pivot(pivot)
         .fixed_pos(pos2(x, y))

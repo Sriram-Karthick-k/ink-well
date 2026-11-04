@@ -22,13 +22,9 @@ path = "src/main.rs"
 # OpenGL (glow) renderer for now. The default wgpu backend is skipped on purpose: it pulls in a large graphics
 # stack that is not needed until the app gets its own GPU stroke renderer.
 eframe = { version = "0.37", default-features = false, features = [
-    "accesskit",
-    "clipboard",
     "default_fonts",
     "glow",
     "links",
-    "wayland",
-    "x11",
 ] }
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 ink-brush = { version = "0.1.0", path = "../ink-brush" }
@@ -36,10 +32,26 @@ ink-core = { version = "0.1.0", path = "../ink-core" }
 ink-format = { version = "0.1.0", path = "../ink-format" }
 ink-gpu = { version = "0.1.0", path = "../ink-gpu" }
 lyon_tessellation = "1.0.23"
-rfd = "0.17.2"
+skrifa = { version = "0.44.0", default-features = false, features = ["std"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 uuid = { version = "1.29.0", features = ["serde"] }
+
+# Desktop: screen-reader support, the system clipboard, the file dialogs, and both Linux window systems.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+eframe = { version = "0.37", default-features = false, features = [
+    "accesskit",
+    "clipboard",
+    "wayland",
+    "x11",
+] }
+rfd = "0.17.2"
+
+# Android: the native-activity backend (eframe does not allow `accesskit` with it). The app handle comes from
+# `android-activity`, the same crate the window library uses.
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = "0.6"
+eframe = { version = "0.37", default-features = false, features = ["android-native-activity"] }
 
 [build-dependencies]
 winresource = "0.1.34"

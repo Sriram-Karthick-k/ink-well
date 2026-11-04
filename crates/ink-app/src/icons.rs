@@ -53,6 +53,12 @@ pub enum Icon {
     LayerDown,
     /// The numbers of the selection: a box with a size mark on each side.
     Size,
+    /// Ready-made figures: a circle and a square overlapping.
+    Shapes,
+    /// Arranging what is shown: three lines, each with a knob on it.
+    Sliders,
+    /// Words: a capital T.
+    Text,
 }
 
 fn line(painter: &Painter, points: Vec<Pos2>, stroke: Stroke) {
@@ -440,6 +446,46 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
                     ],
                     stroke,
                 );
+            }
+        }
+        Icon::Shapes => {
+            painter.circle_stroke(c + vec2(-0.2 * s, -0.22 * s), 0.52 * s, stroke);
+            painter.rect_stroke(
+                Rect::from_center_size(c + vec2(0.24 * s, 0.26 * s), vec2(1.0 * s, 1.0 * s)),
+                CornerRadius::same(2),
+                stroke,
+                StrokeKind::Middle,
+            );
+        }
+        Icon::Text => {
+            painter.line_segment(
+                [
+                    pos2(c.x - s * 0.7, c.y - s * 0.6),
+                    pos2(c.x + s * 0.7, c.y - s * 0.6),
+                ],
+                stroke,
+            );
+            painter.line_segment([pos2(c.x, c.y - s * 0.6), pos2(c.x, c.y + s * 0.7)], stroke);
+            for dx in [-0.7, 0.7] {
+                painter.line_segment(
+                    [
+                        pos2(c.x + dx * s, c.y - s * 0.6),
+                        pos2(c.x + dx * s, c.y - s * 0.28),
+                    ],
+                    stroke,
+                );
+            }
+        }
+        Icon::Sliders => {
+            for (dy, knob) in [(-0.6, -0.35), (0.0, 0.4), (0.6, -0.1)] {
+                painter.line_segment(
+                    [
+                        pos2(c.x - s * 0.85, c.y + dy * s),
+                        pos2(c.x + s * 0.85, c.y + dy * s),
+                    ],
+                    stroke,
+                );
+                painter.circle_filled(pos2(c.x + knob * s, c.y + dy * s), s * 0.2, color);
             }
         }
         Icon::Gear => {

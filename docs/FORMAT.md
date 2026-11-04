@@ -10,7 +10,7 @@ keeps besides them. `ink-format` reads and writes it (`read`, `write`); the mode
 | --- | --- | --- |
 | `manifest.json` | yes | `{"format":"ink","version":1,"writer":"inkwell 0.1.0"}`. `format` must be `ink`; a `version` higher than the reader's is refused with a message to update the app. |
 | `document.json` | yes | The document: its metadata and layers. |
-| `extras.json` | no | The artboard, the shape guides, the locked strokes and the groups. Left out when there is none of them. A damaged one is ignored and the drawing opens without it. |
+| `extras.json` | no | The artboard, the shape guides, the locked strokes, the groups and the words written on the drawing. Left out when there is none of them. A damaged one is ignored and the drawing opens without it. |
 
 Entries are deflate-compressed. A reader refuses an entry that is larger than 512 MB once unpacked (16 MB for
 `extras.json`, 64 KB for the manifest), whatever size the archive declares, so a small file cannot ask for all the
@@ -47,11 +47,23 @@ version gives an error with a plain message.
 ## `extras.json`
 
 ```json
-{ "artboard": { ... }, "guides": [ ... ], "groups": [ ["<stroke id>", "<stroke id>"] ], "locked": ["<stroke id>"] }
+{ "artboard": { ... }, "guides": [ ... ], "groups": [ ["<stroke id>", "<stroke id>"] ], "locked": ["<stroke id>"],
+  "labels": [ { "text": "Hello", "size": 24.0, "height": 17.5, "ids": ["<stroke id>"] } ] }
 ```
 
 Every field is optional. Locks and groups are not part of undo; the artboard and guides are described in
 `PRECISION.md`.
+
+**Labels** remember the words behind letters that were written with the text tool. The letters themselves are ordinary
+strokes of the filling pen (see below), so any reader draws them; a label only says what they spell, so the words can be
+changed later. `ids` are the strokes that make the letters, `size` is how tall the letters were made (per em, in canvas
+units) and `height` how tall all of them together were, to tell how much they have been scaled since. A reader that does
+not know labels loses nothing it could draw.
+
+**The filling pen.** A stroke of the pen `fill` with three or more points is a region: its points are the edge of a polygon,
+closed by a line from the last point back to the first, and everything inside is covered (even and odd: a path that crosses
+itself, or goes in along a line and comes back along it to a hole, leaves the hole empty). Shapes put on the drawing from
+the shapes menu are one or two such strokes (the fill, then the outline) tied in a group.
 
 ## Writing
 

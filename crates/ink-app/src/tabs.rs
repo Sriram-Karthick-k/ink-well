@@ -317,6 +317,13 @@ impl InkApp {
         self.new_document();
     }
 
+    /// Saves the drawing being edited and closes every drawing. For an interface that shows one drawing at a time: what
+    /// is opened or made next is the only one.
+    pub(crate) fn close_all_tabs(&mut self, ctx: &egui::Context) {
+        self.flush_autosave(ctx);
+        self.clear_tabs();
+    }
+
     /// Moves tab `from` to position `to`, keeping the active tab active.
     pub(crate) fn move_tab(&mut self, from: usize, to: usize) {
         if from >= self.tabs.len() || to >= self.tabs.len() || from == to {

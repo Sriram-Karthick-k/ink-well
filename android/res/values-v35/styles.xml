@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- From Android 15 an app is drawn edge to edge, under the system bars, unless it says otherwise. The app does
+         not yet read the size of the bars to keep its panels clear of them, so it says otherwise. This is not
+         possible once an app targets Android 16, so reading the bars is the proper fix. -->
+    <style name="AppTheme" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:statusBarColor">#151412</item>
+        <item name="android:navigationBarColor">#151412</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowBackground">#F9F9F9</item>
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
+    </style>
+</resources>

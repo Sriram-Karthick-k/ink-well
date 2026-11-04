@@ -3,19 +3,21 @@
 use std::ops::RangeInclusive;
 
 use eframe::egui::{
-    self, Align, Color32, CornerRadius, Frame, Layout, Margin, Response, RichText, Sense, Slider,
-    Stroke, Ui, vec2,
+    self, Align, Color32, CornerRadius, FontId, Frame, Label, Layout, Margin, Rect, Response,
+    RichText, Sense, Slider, Stroke, Ui, UiBuilder, pos2, vec2,
 };
 
 use crate::config::Pattern;
+use crate::density;
 use crate::icons::{self, Icon};
 use crate::paper::{self, Ruling};
 use crate::theme;
 
-/// A slider with a handle smaller than the 40-point touch targets of the buttons.
+/// A slider whose height, and so its handle, is the one the density gives.
 pub fn slider(ui: &mut Ui, slider: Slider<'_>) -> Response {
+    let height = density::get(ui.ctx()).slider_height;
     ui.scope(|ui| {
-        ui.spacing_mut().interact_size.y = 32.0;
+        ui.spacing_mut().interact_size.y = height;
         ui.add(slider)
     })
     .inner
@@ -46,7 +48,8 @@ pub fn heading(ui: &mut Ui, text: impl Into<String>) {
 
 /// An on/off switch. Returns the response; `changed()` is set when it was toggled.
 pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
-    let (rect, mut response) = ui.allocate_exact_size(vec2(48.0, 28.0), Sense::click());
+    let size = density::get(ui.ctx()).switch;
+    let (rect, mut response) = ui.allocate_exact_size(size, Sense::click());
     if response.clicked() {
         *on = !*on;
         response.mark_changed();
@@ -54,13 +57,18 @@ pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
     let t = ui.ctx().animate_bool_responsive(response.id, *on);
     let track = theme::CHROME_HI.lerp_to_gamma(theme::ACCENT, t);
     let painter = ui.painter();
-    painter.rect_filled(rect, CornerRadius::same(14), track);
-    let knob_x = egui::lerp(rect.left() + 14.0..=rect.right() - 14.0, t);
-    painter.circle_filled(egui::pos2(knob_x, rect.center().y), 10.5, Color32::WHITE);
+    let radius = size.y / 2.0;
+    painter.rect_filled(rect, CornerRadius::same(radius as u8), track);
+    let knob_x = egui::lerp(rect.left() + radius..=rect.right() - radius, t);
+    painter.circle_filled(
+        egui::pos2(knob_x, rect.center().y),
+        radius - 3.5,
+        Color32::WHITE,
+    );
     if response.hovered() {
         painter.rect_stroke(
             rect,
-            CornerRadius::same(14),
+            CornerRadius::same(radius as u8),
             Stroke::new(1.0, Color32::from_white_alpha(50)),
             egui::StrokeKind::Inside,
         );
@@ -68,24 +76,105 @@ pub fn switch(ui: &mut Ui, on: &mut bool) -> Response {
     response
 }
 
-/// A row with a title and an optional hint on the left and a control on the right.
-pub fn setting_row(ui: &mut Ui, title: &str, hint: Option<&str>, control: impl FnOnce(&mut Ui)) {
-    ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
-            ui.label(RichText::new(title).size(15.0));
-            if let Some(hint) = hint {
-                caption(ui, hint);
-            }
-        });
-        ui.with_layout(Layout::right_to_left(Align::Center), control);
+/// The type sizes of a row.
+const TITLE_SIZE: f32 = 15.0;
+const HINT_SIZE: f32 = 12.5;
+/// The least room the words of a row keep, however wide its control is.
+const LEAST_TEXT: f32 = 96.0;
+/// The gap between the words of a row and its control.
+const ROW_GAP: f32 = 16.0;
+/// How much of a row its control may take, as the room it reports to the widgets in it.
+const CONTROL_SHARE: f32 = 0.6;
+/// A row narrower than this puts the control under the words instead of beside them.
+const STACK_BELOW: f32 = 380.0;
+
+/// The least height of a row: that of the biggest control in it.
+fn row_height(ui: &Ui) -> f32 {
+    density::get(ui.ctx()).row_height
+}
+
+/// The height of a line of text of `size`.
+fn line_height(ui: &Ui, size: f32) -> f32 {
+    ui.painter()
+        .layout_no_wrap("Ag".to_owned(), FontId::proportional(size), Color32::WHITE)
+        .size()
+        .y
+}
+
+/// The title and the hint, wrapped to the width of `ui`.
+fn text_block(ui: &mut Ui, title: &str, hint: Option<&str>) {
+    ui.spacing_mut().item_spacing.y = 2.0;
+    ui.add(Label::new(RichText::new(title).size(TITLE_SIZE)).wrap());
+    if let Some(hint) = hint {
+        ui.add(Label::new(RichText::new(hint).size(HINT_SIZE).color(theme::TEXT_DIM)).wrap());
+    }
+}
+
+/// The title and hint on the left and the control at the right edge. The control is laid out first, so the words
+/// take only what it leaves and wrap, and every control of a kind sits at the same x whatever the words are.
+fn beside(ui: &mut Ui, title: &str, hint: Option<&str>, control: impl FnOnce(&mut Ui)) {
+    let full = ui.available_rect_before_wrap();
+    let one_line =
+        line_height(ui, TITLE_SIZE) + hint.map_or(0.0, |_| 2.0 + line_height(ui, HINT_SIZE));
+    let height = one_line.max(row_height(ui));
+    let zone = Rect::from_min_max(
+        pos2(full.right() - full.width() * CONTROL_SHARE, full.top()),
+        pos2(full.right(), full.top() + height),
+    );
+    let mut right = ui.new_child(
+        UiBuilder::new()
+            .max_rect(zone)
+            .layout(Layout::right_to_left(Align::Center)),
+    );
+    control(&mut right);
+    let control_rect = right.min_rect();
+    let text_right = (control_rect.left() - ROW_GAP).max(full.left() + LEAST_TEXT);
+    let mut left = ui.new_child(
+        UiBuilder::new()
+            .max_rect(Rect::from_min_max(
+                pos2(full.left(), full.top() + (height - one_line) / 2.0),
+                pos2(text_right, full.max.y),
+            ))
+            .layout(Layout::top_down(Align::Min)),
+    );
+    text_block(&mut left, title, hint);
+    ui.advance_cursor_after_rect(control_rect | left.min_rect());
+}
+
+/// The title and hint across the row, and the control on a line of its own under them.
+fn stacked(ui: &mut Ui, title: &str, hint: Option<&str>, control: impl FnOnce(&mut Ui)) {
+    ui.vertical(|ui| {
+        text_block(ui, title, hint);
+        ui.add_space(4.0);
+        let line = Rect::from_min_size(
+            ui.available_rect_before_wrap().min,
+            vec2(ui.available_width(), row_height(ui)),
+        );
+        let mut right = ui.new_child(
+            UiBuilder::new()
+                .max_rect(line)
+                .layout(Layout::right_to_left(Align::Center)),
+        );
+        control(&mut right);
+        ui.advance_cursor_after_rect(line | right.min_rect());
     });
 }
 
-/// A setting that is on or off. Returns whether it changed.
+/// A row with a title and an optional hint on the left and a control on the right; on a narrow screen the control
+/// goes under the words.
+pub fn setting_row(ui: &mut Ui, title: &str, hint: Option<&str>, control: impl FnOnce(&mut Ui)) {
+    if ui.available_width() < STACK_BELOW {
+        stacked(ui, title, hint, control);
+    } else {
+        beside(ui, title, hint, control);
+    }
+}
+
+/// A setting that is on or off. Returns whether it changed. The switch is small, so it stays beside the words on
+/// any width.
 pub fn toggle_row(ui: &mut Ui, title: &str, hint: Option<&str>, on: &mut bool) -> bool {
     let mut changed = false;
-    setting_row(ui, title, hint, |ui| changed = switch(ui, on).changed());
+    beside(ui, title, hint, |ui| changed = switch(ui, on).changed());
     changed
 }
 
@@ -100,13 +189,20 @@ pub fn slider_row(
 ) -> bool {
     let mut changed = false;
     setting_row(ui, title, hint, |ui| {
-        ui.label(
-            RichText::new(shown(*value))
-                .size(14.0)
-                .color(theme::TEXT_DIM)
-                .monospace(),
+        // The value has a place of its own, so the slider does not shift as the number gets longer or shorter.
+        ui.allocate_ui_with_layout(
+            vec2(60.0, row_height(ui) * 0.6),
+            Layout::right_to_left(Align::Center),
+            |ui| {
+                ui.label(
+                    RichText::new(shown(*value))
+                        .size(14.0)
+                        .color(theme::TEXT_DIM)
+                        .monospace(),
+                );
+            },
         );
-        ui.spacing_mut().slider_width = 180.0;
+        ui.spacing_mut().slider_width = (ui.available_width() - 8.0).clamp(100.0, 200.0);
         changed = slider(ui, Slider::new(value, range).show_value(false)).changed();
     });
     changed
@@ -115,6 +211,7 @@ pub fn slider_row(
 /// A row of mutually exclusive choices. Returns whether the choice changed.
 pub fn segmented<T: Copy + PartialEq>(ui: &mut Ui, options: &[(T, &str)], value: &mut T) -> bool {
     let mut changed = false;
+    let choice = density::get(ui.ctx()).choice;
     ui.spacing_mut().item_spacing.x = 4.0;
     // In a row that fills from the right the first button added is the last one seen, so add them the other way
     // round to have the choices read in order.
@@ -139,7 +236,7 @@ pub fn segmented<T: Copy + PartialEq>(ui: &mut Ui, options: &[(T, &str)], value:
         } else {
             Stroke::NONE
         })
-        .min_size(vec2(0.0, 34.0));
+        .min_size(choice);
         if ui.add(button).clicked() && !selected {
             *value = *option;
             changed = true;

@@ -13,6 +13,12 @@ pub const STAMP_STRIDE: usize = 6;
 const MIN_STEP: f32 = 0.2;
 /// Upper bound on the stamps of one stroke; longer strokes get wider spacing instead.
 const MAX_STAMPS: usize = 150_000;
+/// How wide the line along the edge of a region is, in canvas units. It is only there to soften the edge, which a
+/// triangle has no antialiasing of its own to do: any wider and it would make the region bolder than it was drawn, which
+/// shows in small letters. The stamps of such a line are as near as this many canvas units, so it has no gaps even when
+/// the paper is zoomed in a long way.
+const REGION_EDGE: f32 = 0.1;
+const REGION_STEP: f32 = 0.05;
 
 /// How the stamps of one stroke combine into its mask.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -379,6 +385,9 @@ pub struct StrokeBatch {
     pub stamps: Vec<f32>,
     /// Smallest x, smallest y, largest x and largest y in canvas units, including every stamp's radius.
     pub bounds: [f32; 4],
+    /// For a region (the Fill pen): the triangles of its inside, `x, y` pairs in canvas units, three pairs to a
+    /// triangle. The stamps along its edge are over them. Empty for every other stroke.
+    pub fill: Vec<f32>,
 }
 
 impl StrokeBatch {
@@ -390,7 +399,7 @@ impl StrokeBatch {
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.stamps.is_empty()
+        self.stamps.is_empty() && self.fill.is_empty()
     }
 }
 
@@ -478,6 +487,10 @@ impl Attr {
 
 /// Places the stamps of `stroke` along its smoothed `path`.
 #[must_use]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one pass over the path, with the pen's whole rules for size and opacity beside it"
+)]
 pub fn batch_for(stroke: &Stroke, path: &Smoothed) -> StrokeBatch {
     let style = style_for(stroke.pen);
     let mut width = stroke.width.unwrap_or(1.0);
@@ -487,7 +500,23 @@ pub fn batch_for(stroke: &Stroke, path: &Smoothed) -> StrokeBatch {
     if let Some(fixed) = style.fixed_width {
         width = fixed;
     }
-    let points = &path.points;
+    // The Fill pen draws a region: its edge is the path closed by a line back to its start, and its inside is filled.
+    let region = stroke.pen == Pen::Fill && path.points.len() >= 3;
+    if region {
+        width = REGION_EDGE;
+    }
+    let closed: Vec<Point>;
+    let points = if region {
+        closed = path
+            .points
+            .iter()
+            .copied()
+            .chain(std::iter::once(path.points[0]))
+            .collect();
+        &closed
+    } else {
+        &path.points
+    };
     let pressure = path.pressure.as_deref().filter(|p| p.len() == points.len());
     let speeds = path.speed.as_deref().filter(|v| v.len() == points.len());
     let attr_at = |i: usize| Attr {
@@ -524,6 +553,11 @@ pub fn batch_for(stroke: &Stroke, path: &Smoothed) -> StrokeBatch {
         color: rgba(stroke.color),
         stamps: Vec::new(),
         bounds: [f32::MAX, f32::MAX, f32::MIN, f32::MIN],
+        fill: if region {
+            crate::fill::triangulate(&path.points)
+        } else {
+            Vec::new()
+        },
     };
     // The stamps of a textured pen are rotated at random, so a stamp can reach `sqrt(2)` times its radius.
     let reach = if style.mask == MaskKind::None {
@@ -551,7 +585,7 @@ pub fn batch_for(stroke: &Stroke, path: &Smoothed) -> StrokeBatch {
     };
 
     let length: f32 = points.windows(2).map(|w| w[0].distance(w[1])).sum();
-    let floor = (length / MAX_STAMPS as f32).max(MIN_STEP);
+    let floor = (length / MAX_STAMPS as f32).max(if region { REGION_STEP } else { MIN_STEP });
     let step = |a: Attr| (style.spacing * radius(a) * 2.0).max(floor);
 
     let Some(&first) = points.first() else {
@@ -624,6 +658,89 @@ mod tests {
         // spacing 0.1 of a 10-unit diameter is one unit
         assert!((xs[1] - xs[0] - 1.0).abs() < 1e-3);
         assert!((xs[2] - xs[1] - 1.0).abs() < 1e-3);
+    }
+
+    fn square(side: f32) -> Smoothed {
+        Smoothed {
+            points: vec![
+                Point::new(0.0, 0.0),
+                Point::new(side, 0.0),
+                Point::new(side, side),
+                Point::new(0.0, side),
+            ],
+            pressure: None,
+            speed: None,
+        }
+    }
+
+    #[test]
+    fn a_fill_stroke_carries_the_triangles_of_its_inside_and_a_ring_of_stamps_on_its_edge() {
+        let batch = batch_for(&stroke(Pen::Fill, 30.0), &square(100.0));
+        assert!(
+            (crate::fill::area(&batch.fill) - 10_000.0).abs() < 1.0,
+            "the whole square is covered"
+        );
+        assert!(batch.len() > 100, "the edge has stamps: {}", batch.len());
+        assert!(!batch.is_empty());
+        // The ring goes all the way round, including the side that closes the loop.
+        let on_closing_side = batch
+            .stamps
+            .chunks(STAMP_STRIDE)
+            .any(|s| s[0].abs() < 0.01 && s[1] > 40.0 && s[1] < 60.0);
+        assert!(
+            on_closing_side,
+            "the last point is joined back to the first"
+        );
+    }
+
+    #[test]
+    fn the_edge_of_a_region_is_a_hairline_so_small_letters_are_not_made_bolder_than_they_were_drawn()
+     {
+        let batch = batch_for(&stroke(Pen::Fill, 30.0), &square(100.0));
+        let widest = batch
+            .stamps
+            .chunks(STAMP_STRIDE)
+            .map(|s| s[2])
+            .fold(0.0_f32, f32::max);
+        assert!(widest <= 0.1, "a radius of {widest} canvas units");
+        // And it is close enough to have no gaps in it: stamps are never further apart than the line is wide, times ten.
+        let mut xs: Vec<f32> = batch
+            .stamps
+            .chunks(STAMP_STRIDE)
+            .filter(|s| s[1].abs() < 0.01)
+            .map(|s| s[0])
+            .collect();
+        xs.sort_by(f32::total_cmp);
+        let gap = xs
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(gap <= 0.1, "{gap}");
+    }
+
+    #[test]
+    fn every_other_pen_has_no_fill() {
+        for pen in [Pen::Pen, Pen::Marker, Pen::Wire] {
+            assert_eq!(
+                batch_for(&stroke(pen, 5.0), &square(100.0)).fill,
+                Vec::<f32>::new()
+            );
+        }
+    }
+
+    #[test]
+    fn a_fill_stroke_with_fewer_than_three_points_is_the_line_it_always_was() {
+        let batch = batch_for(&stroke(Pen::Fill, 30.0), &line(50.0));
+        assert!(!batch.is_empty(), "the stroke has something to draw");
+        let two = Smoothed {
+            points: vec![Point::new(0.0, 0.0), Point::new(10.0, 0.0)],
+            pressure: None,
+            speed: None,
+        };
+        assert_eq!(
+            batch_for(&stroke(Pen::Fill, 30.0), &two).fill,
+            Vec::<f32>::new()
+        );
     }
 
     const NEW_PENS: [Pen; 10] = [
@@ -779,7 +896,13 @@ mod tests {
         assert!((wire(30.0) - 0.5).abs() < 1e-6, "limited to a width of 1");
         assert!((wire(0.1) - 0.25).abs() < 1e-6, "raised to a width of 0.5");
         assert!((wire(0.8) - 0.4).abs() < 1e-6, "left alone in between");
-        let fill = batch_for(&stroke(Pen::Fill, 30.0), &line(10.0));
+        // With fewer than three points it is a line of one unit, as it always was.
+        let two = Smoothed {
+            points: vec![Point::new(0.0, 0.0), Point::new(10.0, 0.0)],
+            pressure: None,
+            speed: None,
+        };
+        let fill = batch_for(&stroke(Pen::Fill, 30.0), &two);
         assert!((fill.stamps[2] - 0.5).abs() < 1e-6);
     }
 

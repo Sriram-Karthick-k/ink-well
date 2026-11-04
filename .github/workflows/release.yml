@@ -1,8 +1,12 @@
 name: Release
 
-# Builds the Windows portable app. Push a tag like v0.1.0 or RELEASE_1.0_BETA to publish a GitHub release with it
-# (the files are added to the release if you made it by hand on that tag); run the workflow by hand (Actions,
-# Release, Run workflow) to get the same files as a build artifact without publishing anything.
+# Builds the Windows portable app and the Android APK. Push a tag like v0.1.0 or RELEASE_1.1_BETA to publish a GitHub
+# release with them (the files are added to the release if you made it by hand on that tag); run the workflow by hand
+# (Actions, Release, Run workflow) to get the same files as build artifacts without publishing anything.
+#
+# The APK is signed with the key in the repository secrets when there is one (see android/build_apk.py for the four
+# secrets), so that every release can be installed over the one before. Without them it is signed with a key made on
+# the spot, which is good for trying the app but means an older install has to be removed before a newer one goes on.
 on:
   push:
     tags: ["v*", "RELEASE_*"]
@@ -46,13 +50,6 @@ jobs:
           # https://github.com/<owner>/<repo>/releases/latest/download/inkwell-windows-x64.zip
           Copy-Item "dist/$name.zip" dist/inkwell-windows-x64.zip
           Copy-Item target/release/inkwell.exe dist/inkwell-windows-x64.exe
-          # Worked out first, so the list does not include the file it is being written to.
-          $sums = Get-ChildItem dist | ForEach-Object {
-            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
-            "$hash  $($_.Name)"
-          }
-          $sums | Out-File -Encoding ascii dist/SHA256SUMS.txt
-          $sums
           # The runner has no graphics card, so the app cannot be started here; this only catches an empty build.
           if ((Get-Item target/release/inkwell.exe).Length -lt 5MB) { throw 'inkwell.exe is too small to be the app' }
 
@@ -62,18 +59,85 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  android:
+    name: Android APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: rustup show # installs the toolchain pinned in rust-toolchain.toml, with the Android targets
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # The script builds into its own target folder.
+          workspaces: ". -> target/android/cargo"
+
+      - uses: ./.github/actions/android-setup
+
+      - name: Signing key
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE" ]; then
+            echo "No signing key in the secrets: the APK is signed with a key made for this run."
+            exit 0
+          fi
+          echo "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          {
+            echo "INKWELL_KEYSTORE=$RUNNER_TEMP/release.keystore"
+            echo "INKWELL_KEYSTORE_PASS=$STORE_PASSWORD"
+            echo "INKWELL_KEY_ALIAS=$KEY_ALIAS"
+            echo "INKWELL_KEY_PASS=${KEY_PASSWORD:-$STORE_PASSWORD}"
+          } >> "$GITHUB_ENV"
+
+      - name: Build
+        run: python3 android/build_apk.py
+
+      - name: Package
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then version="$GITHUB_REF_NAME"; else version="dev-${GITHUB_SHA::7}"; fi
+          mkdir dist
+          cp target/android/inkwell.apk "dist/inkwell-$version-android-arm64.apk"
+          # Without the version in the name too, so that one link always gets the newest release:
+          # https://github.com/<owner>/<repo>/releases/latest/download/inkwell-android-arm64.apk
+          cp target/android/inkwell.apk dist/inkwell-android-arm64.apk
+          # An empty build is caught here: the app alone is several megabytes.
+          size=$(stat -c %s dist/inkwell-android-arm64.apk)
+          if [ "$size" -lt 2000000 ]; then echo "the APK is too small to be the app ($size bytes)"; exit 1; fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inkwell-android-arm64
+          path: dist/*
+          if-no-files-found: error
+
   publish:
     name: Publish the release
-    needs: windows
+    needs: [windows, android]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the release and attach the files
     steps:
+      - uses: actions/checkout@v4 # for the notes of the release, when there are some
+
       - uses: actions/download-artifact@v4
         with:
-          name: inkwell-windows-x64
+          pattern: inkwell-*
+          merge-multiple: true
           path: dist
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum -- * > ../SHA256SUMS.txt
+          mv ../SHA256SUMS.txt SHA256SUMS.txt
+          cat SHA256SUMS.txt
 
       - name: Create or update the release
         env:
@@ -82,10 +146,16 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           flags=""
-          # v1.0.0-beta.1 and the like are marked as pre-releases.
-          case "$TAG" in *-*) flags="--prerelease" ;; esac
+          # v1.0.0-beta.1, RELEASE_1.1_BETA and the like are marked as pre-releases.
+          case "$TAG" in *-* | *BETA* | *beta*) flags="--prerelease" ;; esac
+          # The notes written for this tag, if there are some; otherwise the ones GitHub makes from the commits.
+          if [ -f "release-notes/$TAG.md" ]; then
+            notes=(--notes-file "release-notes/$TAG.md")
+          else
+            notes=(--generate-notes)
+          fi
           if gh release view "$TAG" > /dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber
           else
-            gh release create "$TAG" dist/* --title "inkwell $TAG" --generate-notes $flags
+            gh release create "$TAG" dist/* --title "inkwell $TAG" "${notes[@]}" $flags
           fi

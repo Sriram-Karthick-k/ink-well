@@ -11,6 +11,20 @@ tools, shapes with fill, text, a tool bar you arrange yourself, and an interface
 Android). The web build is still to come. This is an independent implementation. It is not affiliated with any other
 drawing app, and it contains no third-party assets. See `docs/` for the design.
 
+## Screenshots
+
+The library, with folders and recent drawings:
+
+![The inkwell Library with folders and recent drawings](docs/screenshots/library.png)
+
+The editor, with the pen rail on the left edge and the tab bar at the top:
+
+![The editor showing three colored spirals drawn with the pens](docs/screenshots/editor.png)
+
+A floor plan made of rectangles:
+
+![A floor plan drawn with rectangles in the editor](docs/screenshots/editor-shapes.png)
+
 ## Download
 
 Windows 10 and 11 (64-bit) and Android 8 or newer (64-bit ARM) from the
